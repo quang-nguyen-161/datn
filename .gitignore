@@ -1,0 +1,50 @@
+# Environment / secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Node.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# nRF5 SDK build artefacts
+_build/
+*.hex
+*.bin
+*.elf
+*.map
+*.d
+*.o
+*.a
+*.lst
+*.axf
+
+# Keil MDK
+*.uvguix.*
+*.scvd
+
+# IAR
+*.ewt
+Debug/
+Release/
+
+# SES (SEGGER Embedded Studio)
+Output/
+*.emSession
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# VS Code workspace settings (keep extensions recommendation, ignore personal settings)
+.vscode/settings.json
+.vscode/launch.json

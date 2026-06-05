@@ -1,0 +1,3 @@
+[submodule "health-monitor"]
+	path = health-monitor
+	url = https://github.com/quang-nguyen-161/Wearable_Server.git
