@@ -5,7 +5,7 @@
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 
-/* m_twi and m_xfer_done declared via main.h (included through mma845.h) */
+/* m_twi declared via main.h (included through mma845.h) */
 uint8_t m_deviceAddress = 0x1C;
 accel_result_t g_accel = {0};
 
@@ -389,90 +389,37 @@ bool MMA8452Q_isActive()
 // 	Write a single uint8_t of data to a register in the MMA8452Q.
 bool MMA8452Q_writeRegister(uint8_t reg, uint8_t data)
 {
-    ret_code_t err_code;
-    uint8_t tx_buf[2];
-
-    tx_buf[0] = reg;
-    tx_buf[1] = data;
-
-    m_xfer_done = false;
-
-    err_code = nrf_drv_twi_tx(&m_twi,
-                              m_deviceAddress,
-                              tx_buf,
-                              2,
-                              false);
-    if (err_code != NRF_SUCCESS)
+    uint8_t tx_buf[2] = {reg, data};
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_tx(&m_twi, m_deviceAddress, tx_buf, 2, false) != NRF_SUCCESS)
         return false;
-
-    TWI_WAIT();
-
-    return true;
+    return twi_wait();
 }
 
-// READ A SINGLE REGISTER
-//	Read a uint8_t from the MMA8452Q register "reg".
 bool MMA8452Q_readRegister(uint8_t reg, uint8_t *dest)
 {
-    ret_code_t err_code;
-
-    m_xfer_done = false;
-
-    err_code = nrf_drv_twi_tx(&m_twi,
-                              m_deviceAddress,
-                              &reg,
-                              1,
-                              true);   // repeated start
-    if (err_code != NRF_SUCCESS)
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_tx(&m_twi, m_deviceAddress, &reg, 1, true) != NRF_SUCCESS)
         return false;
+    if (!twi_wait()) return false;
 
-    TWI_WAIT();
-
-    m_xfer_done = false;
-
-    err_code = nrf_drv_twi_rx(&m_twi,
-                              m_deviceAddress,
-                              dest,
-                              1);
-    if (err_code != NRF_SUCCESS)
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_rx(&m_twi, m_deviceAddress, dest, 1) != NRF_SUCCESS)
         return false;
-
-    TWI_WAIT();
-
-    return true;
+    return twi_wait();
 }
 
-// READ MULTIPLE REGISTERS
-//	Read "len" uint8_ts from the MMA8452Q, starting at register "reg". uint8_ts are stored
-//	in "buffer" on exit.
 bool MMA8452Q_readRegisters(uint8_t reg, uint8_t *buffer, uint8_t len)
 {
-    ret_code_t err_code;
-
-    m_xfer_done = false;
-
-    err_code = nrf_drv_twi_tx(&m_twi,
-                              m_deviceAddress,
-                              &reg,
-                              1,
-                              true);
-    if (err_code != NRF_SUCCESS)
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_tx(&m_twi, m_deviceAddress, &reg, 1, true) != NRF_SUCCESS)
         return false;
+    if (!twi_wait()) return false;
 
-    TWI_WAIT();
-
-    m_xfer_done = false;
-
-    err_code = nrf_drv_twi_rx(&m_twi,
-                              m_deviceAddress,
-                              buffer,
-                              len);
-    if (err_code != NRF_SUCCESS)
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_rx(&m_twi, m_deviceAddress, buffer, len) != NRF_SUCCESS)
         return false;
-
-    TWI_WAIT();
-
-    return true;
+    return twi_wait();
 }
 
 

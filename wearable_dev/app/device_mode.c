@@ -6,8 +6,6 @@
 #include "nrf_log_ctrl.h"
 
 #include "ble_app.h"
-#include "flash_user.h"
-#include "fds_example.h"
 
 /* ══════════════════════════════════════════════════════════════
  *  State
@@ -53,38 +51,22 @@ static void apply_ble_interval(device_mode_t mode)
     }
 }
 
-static void save_to_fds(void)
-{
-    configuration_t cfg = {0};
-    uint32_t len = sizeof(cfg);
-
-    /* Read existing record first to preserve other fields */
-    if (m_record_read(CONFIG_FILE, CONFIG_REC_KEY, (uint8_t *)&cfg, &len) == NRF_SUCCESS)
-    {
-        cfg.last_mode   = (uint8_t)g_device_mode;
-        cfg.period_ms_lo = (uint16_t)(g_period_ms & 0xFFFF);
-        cfg.period_ms_hi = (uint16_t)(g_period_ms >> 16);
-        m_record_update(CONFIG_FILE, CONFIG_REC_KEY, (uint8_t *)&cfg, sizeof(cfg));
-    }
-}
-
 /* ══════════════════════════════════════════════════════════════
  *  Public API
  * ════════════════════════════════════════════════════════════ */
 void device_mode_init(void)
 {
-    /* Load saved mode from flash */
-    configuration_t cfg = {0};
-    uint32_t len = sizeof(cfg);
-    if (m_record_read(CONFIG_FILE, CONFIG_REC_KEY, (uint8_t *)&cfg, &len) == NRF_SUCCESS)
+    /* MODE_CONTINUOUS: fire every 10 ms tick.
+     * PERIODIC: fire every g_period_ms. Gateway updates mode/period via BLE. */
+    if (g_device_mode == MODE_CONTINUOUS)
     {
-        if (cfg.last_mode < MODE_COUNT) { g_device_mode = (device_mode_t)cfg.last_mode; }
-        uint32_t p = (uint32_t)cfg.period_ms_lo | ((uint32_t)cfg.period_ms_hi << 16);
-        if (p > 0) { g_period_ms = (uint16_t)(p < 65535 ? p : 65535); }
+        s_tick_target = 1;
     }
-
-    s_tick_target = (g_period_ms + SENSOR_TIMER_MS - 1) / SENSOR_TIMER_MS;
-    if (s_tick_target < 1) { s_tick_target = 1; }
+    else
+    {
+        s_tick_target = (g_period_ms + SENSOR_TIMER_MS - 1) / SENSOR_TIMER_MS;
+        if (s_tick_target < 1) { s_tick_target = 1; }
+    }
 
     /* Start base timer (10 ms, repeating) */
     APP_ERROR_CHECK(app_timer_create(&m_sensor_timer, APP_TIMER_MODE_REPEATED, sensor_timer_cb));
@@ -113,7 +95,6 @@ void device_mode_set(device_mode_t mode)
     /* MODE_ECG: timer keeps running but sensor_timer_cb returns early */
 
     apply_ble_interval(mode);
-    save_to_fds();
 
     NRF_LOG_INFO("Mode → %d", mode);
     NRF_LOG_FLUSH();
@@ -125,7 +106,6 @@ void device_mode_set_period(uint16_t seconds)
     g_period_ms   = (uint16_t)((uint32_t)seconds * 1000 > 65535
                     ? 65535 : (uint32_t)seconds * 1000);
     s_tick_target = (g_period_ms + SENSOR_TIMER_MS - 1) / SENSOR_TIMER_MS;
-    save_to_fds();
 }
 
 uint16_t device_mode_get_period(void)

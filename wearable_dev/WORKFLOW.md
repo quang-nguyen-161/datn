@@ -96,12 +96,19 @@ sensor tick
     │
     ├─[1] MAX30102 PPG  (if s_ppg_present)
     │       max30102_read_samples() — reads FIFO, returns 0 on I2C error
-    │       append to s_ir_buf[] / s_red_buf[]
+    │       append raw uint32 to s_ir_buf[] / s_red_buf[]
     │       when s_ppg_count >= 100 samples (~1 s at 100 Hz):
     │           max30102_compute()
-    │               peak detection on IR channel
+    │               DC_ir, DC_red ← mean of raw buffers (before filtering)
+    │               per-sample DSP pipeline (IR + RED, Fs = 100 Hz):
+    │                 raw → HP 0.5 Hz (IIR1 DF2T)
+    │                     → LP 5.0 Hz (IIR1 DF2T)
+    │                     → ALE-NLMS (32 taps, delay = 15)
+    │                     → Savitzky-Golay (window = 11)
+    │               peak detection on filtered IR  (min dist = 50 samples)
     │               HR from peak intervals  (30–220 bpm valid range)
-    │               SpO2 from peak-valley R-ratio  (70–100% valid range)
+    │               SpO2 peak-valley AC on filtered, normalised by raw DC
+    │                     (70–100% valid range)
     │               3-sample HR history smoothing
     │           → g_sensor.hr_ppg, g_sensor.spo2
     │           → dashboard_update_hr()

@@ -11,17 +11,12 @@
  *  Serves: MAX30102 (0x57)  MMA8452Q (0x1C)  TMP117 (0x48)
  *  Instance: TWI1   SCL = P0.29   SDA = P0.28   400 kHz
  * ════════════════════════════════════════════════════════════ */
-extern nrf_drv_twi_t    m_twi;
-extern volatile bool     m_xfer_done;
+extern nrf_drv_twi_t  m_twi;
+extern volatile bool  m_xfer_done;   /* set true by twi_handler on any completion */
+extern volatile bool  m_xfer_error;  /* set true by twi_handler on NACK/error     */
 
-void twi_init(void);            /* defined in main.c */
-
-/* TWI_WAIT() — replaces bare while(!m_xfer_done) spin-loops.
- * Times out after ~50 000 iterations (~2.3 ms @ 64 MHz) so a dead
- * or missing sensor can never hang the main loop forever.            */
-#define TWI_WAIT() \
-    do { uint32_t _twi_t = 50000; \
-         while (!m_xfer_done && --_twi_t); } while (0)
+void twi_init(void);
+bool twi_wait(void);  /* spin-wait with 200k-cycle timeout; resets bus on timeout */
 
 /* ══════════════════════════════════════════════════════════════
  *  SPI — display bus

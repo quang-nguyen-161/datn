@@ -123,4 +123,8 @@ void ecg_bandpass_init(float fs,
                        biquad_df2t_t *lp1, biquad_df2t_t *lp2,
                        biquad_df2t_t *notch);
 
+/* 1st-order Butterworth coefficient calculators (target iir1_df2t_t) */
+void butter1_lp_coeffs(float fs, float fc, iir1_df2t_t *f);
+void butter1_hp_coeffs(float fs, float fc, iir1_df2t_t *f);
+
 #endif /* __FILTER_H__ */

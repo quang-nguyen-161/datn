@@ -19,7 +19,6 @@
 #include "pedometer.h"      /* pedometer_t, pedometer_update() */
 #include "dashboard.h"      /* dashboard_data_t, dashboard_update_* */
 #include "device_mode.h"
-#include "flash_user.h"
 
 /* ================================================================
  *  Peripheral instances — declared extern in main.h
@@ -27,10 +26,37 @@
 #define TWI_SCL_PIN  29
 #define TWI_SDA_PIN  28
 
-nrf_drv_twi_t    m_twi      = NRF_DRV_TWI_INSTANCE(1);
-volatile bool    m_xfer_done = false;
-nrf_drv_spi_t    m_lcd_spi  = NRF_DRV_SPI_INSTANCE(0);
-sensor_data_t    g_sensor   = {0};
+nrf_drv_twi_t    m_twi        = NRF_DRV_TWI_INSTANCE(1);
+volatile bool    m_xfer_done  = false;
+volatile bool    m_xfer_error = false;
+nrf_drv_spi_t    m_lcd_spi    = NRF_DRV_SPI_INSTANCE(0);
+sensor_data_t    g_sensor     = {0};
+
+void twi_handler(nrf_drv_twi_evt_t const *p_event, void *p_context)
+{
+    (void)p_context;
+    if (p_event->type == NRF_DRV_TWI_EVT_ADDRESS_NACK ||
+        p_event->type == NRF_DRV_TWI_EVT_DATA_NACK) {
+        m_xfer_error = true;
+    }
+    m_xfer_done = true;
+}
+
+/* Spin-waits for the in-flight IRQ-driven transfer to complete.
+ * Timeout ~5 ms at 64 MHz. Resets peripheral if IRQ never fires. */
+bool twi_wait(void)
+{
+    uint32_t timeout = 200000;
+    while (!m_xfer_done && --timeout);
+    if (!timeout) {
+        nrf_drv_twi_disable(&m_twi);
+        nrf_drv_twi_enable(&m_twi);
+    }
+    bool ok = m_xfer_done && !m_xfer_error;
+    m_xfer_done  = false;
+    m_xfer_error = false;
+    return ok;
+}
 
 void twi_init(void)
 {
@@ -41,8 +67,7 @@ void twi_init(void)
         .interrupt_priority = APP_IRQ_PRIORITY_HIGH,
         .clear_bus_init     = false
     };
-    /* NULL handler = blocking/polling mode; sensor reads return error on NACK */
-    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, NULL, NULL);
+    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, twi_handler, NULL);
     APP_ERROR_CHECK(err);
     nrf_drv_twi_enable(&m_twi);
 }
@@ -92,16 +117,19 @@ int main(void)
     log_init();
     timer_init();
     power_management_init();
-    twi_init();
 
-    /* Flash / FDS — init before reading saved mode */
-    m_record_init();
-
+    /* BLE / SoftDevice first — TWI IRQ must be registered after SD enables NVIC */
     ble_app_init();
+
+    /* TWI after SoftDevice: SD resets NVIC on enable, so registering
+     * twi_handler before ble_app_init() loses the IRQ registration */
+    twi_init();
 
     /* ── Sensor init — non-fatal if hardware absent ── */
     s_ppg_present   = max30102_init();
+    nrf_drv_twi_disable(&m_twi); nrf_drv_twi_enable(&m_twi);
     s_accel_present = MMA8452Q_init(0x1C, SCALE_2G, ODR_100);
+    nrf_drv_twi_disable(&m_twi); nrf_drv_twi_enable(&m_twi);
     s_tmp_present   = tmp117_Init();
 
     if (!s_ppg_present)   NRF_LOG_WARNING("[HW] MAX30102 not found");
@@ -117,8 +145,6 @@ int main(void)
     temp_filter_reset(&g_temp_filter);
     memset(&s_dash, 0, sizeof(s_dash));
 
-    /* Load saved mode from FDS, start sensor timer */
-    device_mode_init();
 
     ble_app_advertising_start();
 
@@ -240,6 +266,32 @@ int main(void)
             if (ble_app_is_connected())
             {
                 send_vitals_packet();
+            }
+
+            /* ── Status log every ~1 s (100 × 10 ms ticks) ── */
+            static uint32_t s_log_tick = 0;
+            if (++s_log_tick >= 100)
+            {
+                s_log_tick = 0;
+                NRF_LOG_INFO("--- [STATUS] t=%u ms ---", now_ms);
+                NRF_LOG_INFO("  BLE : %s",
+                             ble_app_is_connected() ? "connected" : "advertising");
+                NRF_LOG_INFO("  ECG : buf=%u/%u  hr=%u bpm",
+                             s_ecg_idx, g_cmd_pkt_samples, g_sensor.hr_ecg);
+                NRF_LOG_INFO("  PPG : hr=%u bpm  spo2=%u%%  buf=%u/%u",
+                             g_sensor.hr_ppg, g_sensor.spo2,
+                             s_ppg_count, PPG_BUF_SIZE);
+                if (g_sensor.temp_valid)
+                {
+                    NRF_LOG_INFO("  TMP : " NRF_LOG_FLOAT_MARKER " C",
+                                 NRF_LOG_FLOAT(g_sensor.temp));
+                }
+                else
+                {
+                    NRF_LOG_INFO("  TMP : no reading");
+                }
+                NRF_LOG_INFO("  HW  : ppg=%d accel=%d tmp=%d",
+                             s_ppg_present, s_accel_present, s_tmp_present);
             }
         }
 

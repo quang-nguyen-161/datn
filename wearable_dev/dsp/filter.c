@@ -433,3 +433,24 @@ void ecg_bandpass_init(float fs,
     notch2_coeffs(fs, notch_hz, notch_Q, notch);
 }
 
+/* ================================================================== */
+/*  1st-order Butterworth coefficient calculators                      */
+/*                                                                    */
+/*  Bilinear transform: K = tan(pi*fc/fs)                            */
+/*  H(z) = (b0 + b1*z^-1) / (1 + a1*z^-1)                          */
+/*  Pole at z = -a1 = (1-K)/(1+K) — same for LP and HP              */
+/* ================================================================== */
+
+void butter1_lp_coeffs(float fs, float fc, iir1_df2t_t *f)
+{
+    float K  = tanf((float)M_PI * fc / fs);
+    float b0 = K / (1.0f + K);
+    iir1_init(f, b0, b0, (K - 1.0f) / (K + 1.0f));
+}
+
+void butter1_hp_coeffs(float fs, float fc, iir1_df2t_t *f)
+{
+    float K  = tanf((float)M_PI * fc / fs);
+    float b0 = 1.0f / (1.0f + K);
+    iir1_init(f, b0, -b0, (K - 1.0f) / (K + 1.0f));
+}

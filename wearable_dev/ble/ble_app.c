@@ -33,10 +33,10 @@
 #define APP_BLE_OBSERVER_PRIO       3
 
 #define APP_ADV_INTERVAL            64          /* 40 ms */
-#define APP_ADV_DURATION            18000       /* 180 s */
+#define APP_ADV_DURATION            0           /* 0 = advertise forever */
 
-#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(20,  UNIT_1_25_MS)
-#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(75,  UNIT_1_25_MS)
+#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(7.5, UNIT_1_25_MS)
+#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(7.5, UNIT_1_25_MS)
 #define SLAVE_LATENCY               0
 #define CONN_SUP_TIMEOUT            MSEC_TO_UNITS(4000, UNIT_10_MS)
 
@@ -55,7 +55,7 @@ NRF_BLE_QWR_DEF(m_qwr);
 BLE_ADVERTISING_DEF(m_advertising);
 
 static uint16_t   m_conn_handle      = BLE_CONN_HANDLE_INVALID;
-static uint16_t   m_ble_max_data_len = NRF_SDH_BLE_GATT_MAX_MTU_SIZE - 3;
+static uint16_t   m_ble_max_data_len = BLE_GATT_ATT_MTU_DEFAULT - 3;  /* 20 bytes; updated by gatt_evt_handler */
 static ble_uuid_t m_adv_uuids[]      = { {CUS_SERVICE_UUID, NUS_SERVICE_UUID_TYPE} };
 
 /* ================================================================
@@ -113,7 +113,7 @@ void power_management_init(void)
 
 void idle_state_handle(void)
 {
-    if (NRF_LOG_PROCESS() == false) { nrf_pwr_mgmt_run(); }
+    if (!NRF_LOG_PROCESS()) { nrf_pwr_mgmt_run(); }
 }
 
 void assert_nrf_callback(uint16_t line_num, const uint8_t *p_file_name)
@@ -148,13 +148,17 @@ static void gatt_evt_handler(nrf_ble_gatt_t *p_gatt, nrf_ble_gatt_evt_t const *p
         (p_evt->evt_id == NRF_BLE_GATT_EVT_ATT_MTU_UPDATED))
     {
         m_ble_max_data_len = p_evt->params.att_mtu_effective - OPCODE_LENGTH - HANDLE_LENGTH;
+        NRF_LOG_INFO("MTU updated: eff=%u data_len=%u", p_evt->params.att_mtu_effective, m_ble_max_data_len);
     }
+    NRF_LOG_DEBUG("ATT MTU exchange completed. central 0x%x peripheral 0x%x",
+                  p_gatt->att_mtu_desired_central, p_gatt->att_mtu_desired_periph);
 }
 
 static void gatt_init(void)
 {
     nrf_ble_gatt_init(&m_gatt, gatt_evt_handler);
-    nrf_ble_gatt_att_mtu_periph_set(&m_gatt, NRF_SDH_BLE_GATT_MAX_MTU_SIZE);
+    nrf_ble_gatt_att_mtu_periph_set(&m_gatt, 247);
+    NRF_LOG_INFO("[GATT] Peripheral MTU requested = 247");
 }
 
 /* ================================================================
@@ -227,22 +231,72 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
     switch (p_ble_evt->header.evt_id)
     {
         case BLE_GAP_EVT_CONNECTED:
-            NRF_LOG_INFO("Connected");
+        {
+            NRF_LOG_INFO("[GAP] Connected  handle=0x%04X", p_ble_evt->evt.gap_evt.conn_handle);
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
-            sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_CONN,
-                                    p_ble_evt->evt.gap_evt.conn_handle, 0);
+
             nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
-            break;
+
+            ble_gap_data_length_params_t dl = {
+                .max_tx_octets  = 251,
+                .max_rx_octets  = 251,
+                .max_tx_time_us = BLE_GAP_DATA_LENGTH_AUTO,
+                .max_rx_time_us = BLE_GAP_DATA_LENGTH_AUTO,
+            };
+            ret_code_t err = sd_ble_gap_data_length_update(m_conn_handle, &dl, NULL);
+            if (err != NRF_SUCCESS && err != NRF_ERROR_INVALID_STATE)
+            {
+                NRF_LOG_WARNING("DLE request 0x%X (central may not support)", err);
+            }
+        }
+        break;
 
         case BLE_GAP_EVT_DISCONNECTED:
-            NRF_LOG_INFO("Disconnected");
+            NRF_LOG_INFO("[GAP] Disconnected  reason=0x%02X",
+                         p_ble_evt->evt.gap_evt.params.disconnected.reason);
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            /* Advertising restarts automatically via on_adv_evt */
             break;
 
-        case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {
-            ble_gap_phys_t phys = { BLE_GAP_PHY_AUTO, BLE_GAP_PHY_AUTO };
-            sd_ble_gap_phy_update(p_ble_evt->evt.gap_evt.conn_handle, &phys);
-        } break;
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST:
+        {
+            ble_gap_data_length_params_t const *p =
+                &p_ble_evt->evt.gap_evt.params.data_length_update_request.peer_params;
+            NRF_LOG_INFO("[DLE] Central proposes TX=%u RX=%u - accepting",
+                         p->max_tx_octets, p->max_rx_octets);
+            sd_ble_gap_data_length_update(p_ble_evt->evt.gap_evt.conn_handle, NULL, NULL);
+        }
+        break;
+
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE:
+        {
+            ble_gap_data_length_params_t const *p =
+                &p_ble_evt->evt.gap_evt.params.data_length_update.effective_params;
+            NRF_LOG_INFO("DLE: TX=%u B/%u us  RX=%u B/%u us",
+                         p->max_tx_octets, p->max_tx_time_us,
+                         p->max_rx_octets, p->max_rx_time_us);
+        }
+        break;
+
+        case BLE_GAP_EVT_PHY_UPDATE_REQUEST:
+        {
+            ble_gap_phys_t const phys = {
+                .rx_phys = BLE_GAP_PHY_AUTO,
+                .tx_phys = BLE_GAP_PHY_AUTO,
+            };
+            ret_code_t err = sd_ble_gap_phy_update(p_ble_evt->evt.gap_evt.conn_handle, &phys);
+            APP_ERROR_CHECK(err);
+        }
+        break;
+
+        case BLE_GAP_EVT_PHY_UPDATE:
+        {
+            ble_gap_evt_phy_update_t const *p = &p_ble_evt->evt.gap_evt.params.phy_update;
+            NRF_LOG_INFO("[PHY] TX=%u RX=%u Mbps",
+                         (p->tx_phy == BLE_GAP_PHY_AUTO) ? 2 : 1,
+                         (p->rx_phy == BLE_GAP_PHY_AUTO) ? 2 : 1);
+        }
+        break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
             sd_ble_gap_sec_params_reply(m_conn_handle,
@@ -272,10 +326,18 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
  * ================================================================ */
 static void ble_stack_init(void)
 {
-    nrf_sdh_enable_request();
+    ret_code_t err_code;
+
+    err_code = nrf_sdh_enable_request();
+    APP_ERROR_CHECK(err_code);
+
     uint32_t ram_start = 0;
-    nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
-    nrf_sdh_ble_enable(&ram_start);
+    err_code = nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrf_sdh_ble_enable(&ram_start);
+    APP_ERROR_CHECK(err_code);
+
     NRF_SDH_BLE_OBSERVER(m_ble_obs, APP_BLE_OBSERVER_PRIO, ble_evt_handler, NULL);
 }
 
@@ -294,7 +356,7 @@ static void advertising_init(void)
     ble_advertising_init_t init = {0};
     init.advdata.name_type               = BLE_ADVDATA_FULL_NAME;
     init.advdata.include_appearance      = false;
-    init.advdata.flags                   = BLE_GAP_ADV_FLAGS_LE_ONLY_LIMITED_DISC_MODE;
+    init.advdata.flags                   = BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE; 	//never set this to limited_disc_mode
     init.srdata.uuids_complete.uuid_cnt  = ARRAY_SIZE(m_adv_uuids);
     init.srdata.uuids_complete.p_uuids   = m_adv_uuids;
     init.config.ble_adv_fast_enabled     = true;

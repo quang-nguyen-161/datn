@@ -8,22 +8,23 @@
 
 uint8_t MyTMP117_DeviceID = MyTMP117_GND;
 
-extern const nrf_drv_twi_t m_twi;
+#include "main.h"   /* m_twi, m_xfer_done, m_xfer_error, twi_wait() */
 
 uint16_t TMP117_read_register(uint8_t reg)
 {
     uint8_t buffer[2] = {0};
-    ret_code_t err_code;
 
-    err_code = nrf_drv_twi_tx(&m_twi, MyTMP117_DeviceID, &reg, sizeof(reg), false);
-    if (err_code != NRF_SUCCESS) {
-        NRF_LOG_WARNING("TMP117 I2C TX fail reg=0x%02X err=0x%X", reg, err_code);
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_tx(&m_twi, MyTMP117_DeviceID, &reg, sizeof(reg), false) != NRF_SUCCESS
+        || !twi_wait()) {
+        NRF_LOG_WARNING("TMP117 TX fail reg=0x%02X", reg);
         return TMP117_READ_ERROR;
     }
 
-    err_code = nrf_drv_twi_rx(&m_twi, MyTMP117_DeviceID, buffer, 2);
-    if (err_code != NRF_SUCCESS) {
-        NRF_LOG_WARNING("TMP117 I2C RX fail reg=0x%02X err=0x%X", reg, err_code);
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_rx(&m_twi, MyTMP117_DeviceID, buffer, 2) != NRF_SUCCESS
+        || !twi_wait()) {
+        NRF_LOG_WARNING("TMP117 RX fail reg=0x%02X", reg);
         return TMP117_READ_ERROR;
     }
 
@@ -32,17 +33,14 @@ uint16_t TMP117_read_register(uint8_t reg)
 
 bool TMP117_write_register(uint8_t reg, uint8_t msb, uint8_t lsb)
 {
-    ret_code_t err_code;
-    uint8_t buffer[3];
-    buffer[0] = reg;
-    buffer[1] = msb;
-    buffer[2] = lsb;
-    err_code = nrf_drv_twi_tx(&m_twi, MyTMP117_DeviceID, buffer, sizeof(buffer), false);
-    if (err_code != NRF_SUCCESS) {
-        NRF_LOG_WARNING("TMP117 I2C write fail reg=0x%02X err=0x%X", reg, err_code);
+    uint8_t buffer[3] = {reg, msb, lsb};
+
+    m_xfer_done = false; m_xfer_error = false;
+    if (nrf_drv_twi_tx(&m_twi, MyTMP117_DeviceID, buffer, sizeof(buffer), false) != NRF_SUCCESS
+        || !twi_wait()) {
+        NRF_LOG_WARNING("TMP117 write fail reg=0x%02X", reg);
         return false;
     }
-    nrf_delay_ms(1);
     return true;
 }
 
@@ -68,19 +66,23 @@ void tmp117_set_HighLimit(uint8_t first, uint8_t second)
 
 bool tmp117_Init(void)
 {
-    uint16_t device_id = TMP117_read_register(MyTMP117_ID_Reg);
-
-    if (device_id == TMP117_READ_ERROR) {
-        NRF_LOG_ERROR("TMP117: Cannot communicate via I2C");
-        return false;
+    /* Auto-scan all four ADDR-pin addresses */
+    static const uint8_t addrs[4] = {
+        MyTMP117_GND, MyTMP117_VCC, MyTMP117_SDA, MyTMP117_SCL
+    };
+    uint16_t device_id = TMP117_READ_ERROR;
+    for (int i = 0; i < 4; i++) {
+        MyTMP117_DeviceID = addrs[i];
+        device_id = TMP117_read_register(MyTMP117_ID_Reg);
+        if (device_id == TMP117_DEVICE_ID) break;
     }
-
-    NRF_LOG_INFO("TMP117 ID: 0x%04X", device_id);
 
     if (device_id != TMP117_DEVICE_ID) {
-        NRF_LOG_ERROR("TMP117: Wrong ID=0x%04X, expected 0x%04X", device_id, TMP117_DEVICE_ID);
+        NRF_LOG_ERROR("TMP117: Not found (tried 0x48–0x4B)");
         return false;
     }
+
+    NRF_LOG_INFO("TMP117 found at 0x%02X", MyTMP117_DeviceID);
 
     tmp117_set_Config(0x02, 0x20);
     tmp117_set_Temp_Offset(0x00, 0x00);

@@ -132,7 +132,7 @@ void ecg_init(void)
 
     saadc_init();
     ppi_init();
-    NRF_LOG_INFO("ECG: 250 Hz PPI sampling started (BP→ALE→SG pipeline)");
+    NRF_LOG_INFO("ECG: 250 Hz PPI sampling started (BP -> ALE -> SG pipeline)");
     NRF_LOG_FLUSH();
 }
 
