@@ -54,6 +54,42 @@ SRC_FILES += \
   $(SDK_ROOT)/components/libraries/bsp/bsp.c \
   $(SDK_ROOT)/components/libraries/bsp/bsp_btn_ble.c \
   $(PROJ_DIR)/main.c \
+  $(PROJ_DIR)/ble/ble_app.c \
+  $(PROJ_DIR)/ble/cus_service.c \
+  $(PROJ_DIR)/ecg/ecg.c \
+  $(PROJ_DIR)/dsp/filter.c \
+  $(PROJ_DIR)/app/device_mode.c \
+  $(PROJ_DIR)/cmd/cmd.c \
+  $(PROJ_DIR)/storage/flash_user.c \
+  $(PROJ_DIR)/drivers/accel/mma845.c \
+  $(PROJ_DIR)/drivers/accel/accel_filter.c \
+  $(PROJ_DIR)/drivers/ppg/max.c \
+  $(PROJ_DIR)/drivers/ppg/spo2_algorithm.c \
+  $(PROJ_DIR)/drivers/ppg/algorithm_by_RF.c \
+  $(PROJ_DIR)/drivers/temp/tmp117.c \
+  $(PROJ_DIR)/drivers/display/GC9A01.c \
+  $(PROJ_DIR)/drivers/display/dashboard.c \
+  $(PROJ_DIR)/drivers/display/lcd_power.c \
+  $(PROJ_DIR)/drivers/display/font.c \
+  $(PROJ_DIR)/drivers/display/font8.c \
+  $(PROJ_DIR)/drivers/display/font12.c \
+  $(PROJ_DIR)/drivers/display/font16.c \
+  $(PROJ_DIR)/drivers/display/font20.c \
+  $(PROJ_DIR)/drivers/display/font24.c \
+  $(SDK_ROOT)/integration/nrfx/legacy/nrf_drv_twi.c \
+  $(SDK_ROOT)/integration/nrfx/legacy/nrf_drv_ppi.c \
+  $(SDK_ROOT)/integration/nrfx/legacy/nrf_drv_spi.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_ppi.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_timer.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_saadc.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_twi.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_spi.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_spim.c \
+  $(SDK_ROOT)/modules/nrfx/drivers/src/nrfx_pwm.c \
+  $(SDK_ROOT)/components/libraries/fds/fds.c \
+  $(SDK_ROOT)/components/libraries/fstorage/nrf_fstorage.c \
+  $(SDK_ROOT)/components/libraries/fstorage/nrf_fstorage_sd.c \
+  $(SDK_ROOT)/components/libraries/crc16/crc16.c \
   $(SDK_ROOT)/external/segger_rtt/SEGGER_RTT.c \
   $(SDK_ROOT)/external/segger_rtt/SEGGER_RTT_Syscalls_GCC.c \
   $(SDK_ROOT)/external/segger_rtt/SEGGER_RTT_printf.c \
@@ -66,13 +102,23 @@ SRC_FILES += \
   $(SDK_ROOT)/components/ble/nrf_ble_gatt/nrf_ble_gatt.c \
   $(SDK_ROOT)/components/ble/nrf_ble_qwr/nrf_ble_qwr.c \
   $(SDK_ROOT)/external/utf_converter/utf.c \
-  $(SDK_ROOT)/components/ble/ble_services/ble_nus/ble_nus.c \
   $(SDK_ROOT)/components/softdevice/common/nrf_sdh.c \
   $(SDK_ROOT)/components/softdevice/common/nrf_sdh_ble.c \
   $(SDK_ROOT)/components/softdevice/common/nrf_sdh_soc.c \
 
 # Include folders common to all targets
 INC_FOLDERS += \
+  $(PROJ_DIR) \
+  $(PROJ_DIR)/ble \
+  $(PROJ_DIR)/ecg \
+  $(PROJ_DIR)/dsp \
+  $(PROJ_DIR)/app \
+  $(PROJ_DIR)/cmd \
+  $(PROJ_DIR)/storage \
+  $(PROJ_DIR)/drivers/accel \
+  $(PROJ_DIR)/drivers/ppg \
+  $(PROJ_DIR)/drivers/temp \
+  $(PROJ_DIR)/drivers/display \
   $(SDK_ROOT)/components/nfc/ndef/generic/message \
   $(SDK_ROOT)/components/nfc/t2t_lib \
   $(SDK_ROOT)/components/nfc/t4t_parser/hl_detection_procedure \

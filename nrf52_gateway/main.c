@@ -56,15 +56,18 @@
 /* ── UART framing (must match ESP32 firmware and gateway.py) ─────────────── */
 
 /* Inbound (nRF → ESP32) */
-#define PKT_TYPE_ECG        0x01
+#define PKT_TYPE_ECG        0x01   /* up to 100×int16 LE = 200 bytes (dynamic, size-agnostic dispatch) */
+#define PKT_TYPE_VITALS     0x02   /* 4×float32 LE = 16 bytes: [ecgHr][ppgHr][spo2][temp] */
 /* Outbound (ESP32 → nRF, forwarded to BLE node) */
-#define PKT_TYPE_CFG        0x03   /* ECG config:   6 B [0xCF][node_id][fLo][fHi][iLo][iHi] */
-#define PKT_TYPE_THR        0x04   /* Threshold:   32 B [0xCE][node_id][18×u8 PPG/ECG/SpO2][6×u16LE temp×10] */
-#define PKT_TYPE_ACK        0x05   /* Connect ACK:  6 B [0xA0][addr_b2..b5][node_id] */
+#define PKT_TYPE_CFG        0x03   /* ECG config:   5 B [0xCF][fLo][fHi][iLo][iHi] */
+#define PKT_TYPE_THR        0x04   /* Threshold:   31 B [0xCE][18×u8 PPG/ECG/SpO2][6×u16LE temp×10] */
+#define PKT_TYPE_PPG        0x05   /* PPG config:   5 B [0xCD][fLo][fHi][redMa][irMa] */
+#define PKT_TYPE_VCF        0x06   /* Vital cfg:    3 B [0xCC][iLo][iHi] */
 #define ECG_CFG_CMD         0xCF
 #define THR_CMD             0xCE
-#define ACK_CMD             0xA0
-#define MAX_CMD_LEN         32     /* largest outbound payload = threshold   */
+#define PPG_CFG_CMD         0xCD
+#define VITAL_CFG_CMD       0xCC
+#define MAX_CMD_LEN         31     /* largest outbound payload = threshold   */
 #define UART_MAGIC_0        0xAA
 #define UART_MAGIC_1        0x55
 #define UART_TX_BUF_SIZE    256
@@ -131,6 +134,33 @@ static void uart_send_ecg(const uint8_t *data, uint16_t len)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   UART TX  —  send framed vitals packet to ESP32
+   Packet: [AA][55][02][nlen][name…][len_lo][len_hi][data…][xor]
+   ══════════════════════════════════════════════════════════════════════════ */
+
+static void uart_send_vitals(const uint8_t *data, uint16_t len)
+{
+    const char    *name = TB_NODE_NAME;
+    const uint8_t  nlen = (uint8_t)strlen(name);
+
+    uint8_t chk = PKT_TYPE_VITALS;
+    chk ^= nlen;
+    for (uint8_t i = 0; i < nlen; i++)   chk ^= (uint8_t)name[i];
+    chk ^= (uint8_t)(len & 0xFF);
+    chk ^= (uint8_t)(len >> 8);
+    for (uint16_t i = 0; i < len; i++)   chk ^= data[i];
+
+#define PUT(b)  if (app_uart_put(b) != NRF_SUCCESS) { \
+                    NRF_LOG_WARNING("[UART] TX overflow"); return; }
+    PUT(UART_MAGIC_0); PUT(UART_MAGIC_1); PUT(PKT_TYPE_VITALS); PUT(nlen);
+    for (uint8_t  i = 0; i < nlen; i++) { PUT((uint8_t)name[i]); }
+    PUT((uint8_t)(len & 0xFF)); PUT((uint8_t)(len >> 8));
+    for (uint16_t i = 0; i < len;  i++) { PUT(data[i]); }
+    PUT(chk);
+#undef PUT
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    UART RX  —  parse framed config packets from ESP32
    Only TYPE 0x03 (config) is acted on; all other types are discarded.
    ══════════════════════════════════════════════════════════════════════════ */
@@ -156,9 +186,10 @@ static void uart_handle_pkt(void)
 
     bool fwd = false;
     switch (s_type) {
-        case PKT_TYPE_CFG: fwd = (s_dlen == 6  && s_data[0] == ECG_CFG_CMD); break;
-        case PKT_TYPE_THR: fwd = (s_dlen == 32 && s_data[0] == THR_CMD);     break;
-        case PKT_TYPE_ACK: fwd = (s_dlen == 6  && s_data[0] == ACK_CMD);     break;
+        case PKT_TYPE_CFG: fwd = (s_dlen == 5  && s_data[0] == ECG_CFG_CMD);   break;
+        case PKT_TYPE_THR: fwd = (s_dlen == 31 && s_data[0] == THR_CMD);       break;
+        case PKT_TYPE_PPG: fwd = (s_dlen == 5  && s_data[0] == PPG_CFG_CMD);   break;
+        case PKT_TYPE_VCF: fwd = (s_dlen == 3  && s_data[0] == VITAL_CFG_CMD); break;
         default: break;
     }
     if (!fwd) {
@@ -424,14 +455,25 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
             scan_start();
             break;
 
-        /* ECG notify from node — forward to ESP32 via UART */
+        /* BLE notify from node — dispatch by packet length, forward to ESP32 */
         case BLE_GATTC_EVT_HVX:
         {
             ble_gattc_evt_hvx_t const *hvx = &p_ble_evt->evt.gattc_evt.params.hvx;
             if (hvx->handle == m_tx_char_handle &&
                 hvx->type   == BLE_GATT_HVX_NOTIFICATION)
             {
-                uart_send_ecg(hvx->data, hvx->len);
+                if (hvx->len == 16)                        /* 4×float32 vitals (always 16 B) */
+                {
+                    uart_send_vitals(hvx->data, hvx->len);
+                }
+                else if (hvx->len >= 2 && (hvx->len & 1) == 0) /* N×int16 ECG (dynamic batch) */
+                {
+                    uart_send_ecg(hvx->data, hvx->len);
+                }
+                else
+                {
+                    NRF_LOG_WARNING("[BLE] unexpected HVX len=%u", hvx->len);
+                }
             }
         }
         break;

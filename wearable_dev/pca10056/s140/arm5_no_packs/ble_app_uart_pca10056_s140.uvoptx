@@ -388,7 +388,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\algorithm_by_RF.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\ppg\algorithm_by_RF.c</PathWithFileName>
       <FilenameWithoutPath>algorithm_by_RF.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -400,7 +400,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\cus_service.c</PathWithFileName>
+      <PathWithFileName>..\..\..\ble\cus_service.c</PathWithFileName>
       <FilenameWithoutPath>cus_service.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -412,7 +412,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\filter.c</PathWithFileName>
+      <PathWithFileName>..\..\..\dsp\filter.c</PathWithFileName>
       <FilenameWithoutPath>filter.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -424,7 +424,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\flash_user.c</PathWithFileName>
+      <PathWithFileName>..\..\..\storage\flash_user.c</PathWithFileName>
       <FilenameWithoutPath>flash_user.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -436,7 +436,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\GC9A01.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\GC9A01.c</PathWithFileName>
       <FilenameWithoutPath>GC9A01.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -448,7 +448,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\spo2_algorithm.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\ppg\spo2_algorithm.c</PathWithFileName>
       <FilenameWithoutPath>spo2_algorithm.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -460,7 +460,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\tmp117.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\temp\tmp117.c</PathWithFileName>
       <FilenameWithoutPath>tmp117.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -472,7 +472,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\max.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\ppg\max.c</PathWithFileName>
       <FilenameWithoutPath>max.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -484,7 +484,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\dashboard.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\dashboard.c</PathWithFileName>
       <FilenameWithoutPath>dashboard.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -496,7 +496,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\font8.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\font8.c</PathWithFileName>
       <FilenameWithoutPath>font8.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -508,7 +508,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\font12.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\font12.c</PathWithFileName>
       <FilenameWithoutPath>font12.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -520,7 +520,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\font16.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\font16.c</PathWithFileName>
       <FilenameWithoutPath>font16.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -532,7 +532,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\font20.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\font20.c</PathWithFileName>
       <FilenameWithoutPath>font20.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
@@ -544,7 +544,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\font24.c</PathWithFileName>
+      <PathWithFileName>..\..\..\drivers\display\font24.c</PathWithFileName>
       <FilenameWithoutPath>font24.c</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
