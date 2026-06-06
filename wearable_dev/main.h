@@ -53,10 +53,13 @@ void lcd_spi_init(void);        /* defined in drivers/display/GC9A01.c */
  *  Written by each driver; read by main loop and BLE packet builder.
  * ════════════════════════════════════════════════════════════ */
 typedef struct {
-    uint8_t hr_ppg;   /* heart rate (BPM) from MAX30102 PPG   */
-    uint8_t hr_ecg;   /* heart rate (BPM) from ECG R-peak     */
-    uint8_t spo2;     /* SpO2 (%) from MAX30102               */
-    float   temp;     /* temperature (°C) from TMP117         */
+    uint8_t  hr_ppg;      /* heart rate (BPM) from MAX30102 PPG   */
+    uint8_t  hr_ecg;      /* heart rate (BPM) from ECG R-peak     */
+    uint8_t  spo2;        /* SpO2 (%) from MAX30102               */
+    float    temp;        /* temperature (°C) from TMP117         */
+    bool     temp_valid;  /* TMP117 has settled reading           */
+    uint32_t steps;       /* pedometer step count (LCD only)      */
+    float    cadence;     /* steps per minute (LCD only)          */
 } sensor_data_t;
 
 extern sensor_data_t g_sensor;

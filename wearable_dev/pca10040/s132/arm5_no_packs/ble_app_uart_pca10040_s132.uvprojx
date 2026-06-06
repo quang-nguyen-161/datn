@@ -478,6 +478,11 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\drivers\accel\mma845.c</FilePath>
             </File>
+            <File>
+              <FileName>pedometer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\drivers\accel\pedometer.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -493,20 +498,20 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\drivers\ppg\max.c</FilePath>
             </File>
-            <File>
-              <FileName>algorithm_by_RF.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\..\..\drivers\ppg\algorithm_by_RF.c</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Drivers/Temp</GroupName>
           <Files>
             <File>
-              <FileName>tmp117.c</FileName>
+              <FileName>tmp117_v2.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\..\..\drivers\temp\tmp117.c</FilePath>
+              <FilePath>..\..\..\drivers\temp\tmp117_v2.c</FilePath>
+            </File>
+            <File>
+              <FileName>temp_filter.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\drivers\temp\temp_filter.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -4377,6 +4382,11 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\drivers\accel\mma845.c</FilePath>
             </File>
+            <File>
+              <FileName>pedometer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\drivers\accel\pedometer.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -4392,20 +4402,20 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\drivers\ppg\max.c</FilePath>
             </File>
-            <File>
-              <FileName>algorithm_by_RF.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\..\..\drivers\ppg\algorithm_by_RF.c</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Drivers/Temp</GroupName>
           <Files>
             <File>
-              <FileName>tmp117.c</FileName>
+              <FileName>tmp117_v2.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\..\..\drivers\temp\tmp117.c</FilePath>
+              <FilePath>..\..\..\drivers\temp\tmp117_v2.c</FilePath>
+            </File>
+            <File>
+              <FileName>temp_filter.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\drivers\temp\temp_filter.c</FilePath>
             </File>
           </Files>
         </Group>

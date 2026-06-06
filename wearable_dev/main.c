@@ -12,9 +12,12 @@
 #include "cus_service.h"
 #include "ecg.h"
 #include "cmd.h"
-#include "max.h"            /* timer2_init(), max30102_setup(), max30102_cal() */
-#include "mma845.h"         /* MMA8452Q_init(), MMA8452Q_read() */
-#include "tmp117.h"         /* tmp117_Init(), tmp117_alert_init(), tmp117_poll() */
+#include "max.h"            /* max30102_init/read_samples/compute, timer2_init/now */
+#include "mma845.h"         /* MMA8452Q_init(), MMA8452Q_read(), g_accel */
+#include "tmp117_v2.h"      /* tmp117_Init(), tmp117_wake_oneshot(), tmp117_get_Temp() */
+#include "temp_filter.h"    /* temp_filter_t, temp_filter_update() */
+#include "pedometer.h"      /* pedometer_t, pedometer_update() */
+#include "dashboard.h"      /* dashboard_data_t, dashboard_update_* */
 #include "device_mode.h"
 #include "flash_user.h"
 
@@ -29,21 +32,17 @@ volatile bool    m_xfer_done = false;
 nrf_drv_spi_t    m_lcd_spi  = NRF_DRV_SPI_INSTANCE(0);
 sensor_data_t    g_sensor   = {0};
 
-static void twi_handler(nrf_drv_twi_evt_t const *p_event, void *p_context)
-{
-    if (p_event->type == NRF_DRV_TWI_EVT_DONE) { m_xfer_done = true; }
-}
-
 void twi_init(void)
 {
     const nrf_drv_twi_config_t cfg = {
         .scl                = TWI_SCL_PIN,
         .sda                = TWI_SDA_PIN,
-        .frequency          = NRF_DRV_TWI_FREQ_400K,       /* 400 kHz */
+        .frequency          = NRF_DRV_TWI_FREQ_400K,
         .interrupt_priority = APP_IRQ_PRIORITY_HIGH,
         .clear_bus_init     = false
     };
-    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, twi_handler, NULL);
+    /* NULL handler = blocking/polling mode; sensor reads return error on NACK */
+    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, NULL, NULL);
     APP_ERROR_CHECK(err);
     nrf_drv_twi_enable(&m_twi);
 }
@@ -51,20 +50,39 @@ void twi_init(void)
 /* ================================================================
  *  BLE packet helpers
  * ================================================================ */
-static int16_t   s_ecg_buf[ECG_BUF_SAMPLES];
-static uint16_t  s_ecg_idx = 0;
+static int16_t  s_ecg_buf[ECG_BUF_SAMPLES];
+static uint16_t s_ecg_idx = 0;
 
 static void send_vitals_packet(void)
 {
     /* 4×float32 LE = 16 bytes: [ecgHr][ppgHr][spo2][temp]
-     * nRF central dispatches 16-byte BLE packets as UART TYPE 0x02 (vitals) */
-    float pkt[4];
-    pkt[0] = (float)g_sensor.hr_ecg;
-    pkt[1] = (float)g_sensor.hr_ppg;
-    pkt[2] = (float)g_sensor.spo2;
-    pkt[3] = g_sensor.temp;
+     * Dispatched by gateway on len==16; published as ecgHeartRate/ppgHeartRate/spo2/temperature */
+    float pkt[4] = { g_sensor.hr_ecg, g_sensor.hr_ppg, g_sensor.spo2, g_sensor.temp };
     ble_app_send((uint8_t *)pkt, sizeof(pkt));
 }
+
+/* ================================================================
+ *  Sensor state
+ * ================================================================ */
+static pedometer_t      g_pedometer;
+static temp_filter_t    g_temp_filter;
+static dashboard_data_t s_dash;
+static uint16_t         s_ecg_display = 500;  /* ECG mapped to 0–999 for LCD */
+
+/* Sensor presence — set at init, guards all tick reads */
+static bool s_ppg_present   = false;
+static bool s_accel_present = false;
+static bool s_tmp_present   = false;
+
+/* MAX30102 sample accumulation — filled at 100 Hz (1 sample / 10 ms tick) */
+#define PPG_BUF_SIZE 100
+static uint32_t s_ir_buf[PPG_BUF_SIZE];
+static uint32_t s_red_buf[PPG_BUF_SIZE];
+static int      s_ppg_count = 0;
+
+/* TMP117 one-shot state machine */
+static bool     s_tmp_triggered  = false;
+static uint32_t s_tmp_trigger_ms = 0;
 
 /* ================================================================
  *  Entry point
@@ -81,14 +99,23 @@ int main(void)
 
     ble_app_init();
 
-    /* Sensors */
-    max30102_setup();
-    MMA8452Q_init(0x1C, SCALE_2G, ODR_100);
-    mma8452q_alert_init();  /* configures GPIOTE freefall interrupt if MMA8452Q_INT1_PIN is set */
-    tmp117_Init();
+    /* ── Sensor init — non-fatal if hardware absent ── */
+    s_ppg_present   = max30102_init();
+    s_accel_present = MMA8452Q_init(0x1C, SCALE_2G, ODR_100);
+    s_tmp_present   = tmp117_Init();
 
-    timer2_init();          /* free-running µs counter on TIMER2 */
-    ecg_init();             /* SAADC + PPI → 250 Hz autonomous ECG sampling */
+    if (!s_ppg_present)   NRF_LOG_WARNING("[HW] MAX30102 not found");
+    if (!s_accel_present) NRF_LOG_WARNING("[HW] MMA8452Q not found");
+    if (!s_tmp_present)   NRF_LOG_WARNING("[HW] TMP117 not found");
+
+    if (s_accel_present) { mma8452q_alert_init(); }
+
+    timer2_init();     /* free-running µs counter on TIMER2         */
+    ecg_init();        /* SAADC + PPI → 250 Hz autonomous ECG       */
+
+    pedometer_reset(&g_pedometer);
+    temp_filter_reset(&g_temp_filter);
+    memset(&s_dash, 0, sizeof(s_dash));
 
     /* Load saved mode from FDS, start sensor timer */
     device_mode_init();
@@ -98,11 +125,19 @@ int main(void)
     /* ── Main loop ─────────────────────────────────────────── */
     while (1)
     {
-        /* ── ECG sample ready (all modes) ── */
+        uint32_t now_ms = timer2_now() / 1000;
+
+        /* ── ECG sample ready (250 Hz, set by SAADC ISR) ── */
         if (g_ecg_ready)
         {
             g_ecg_ready = false;
-            float filtered = ecg_process(g_ecg_raw);  /* updates g_ecg */
+            float filtered = ecg_process(g_ecg_raw);
+
+            /* Scale to 0–999 for LCD waveform */
+            int32_t ecg_disp = (int32_t)(g_ecg.filtered * 0.25f) + 500;
+            if (ecg_disp < 0)   ecg_disp = 0;
+            if (ecg_disp > 999) ecg_disp = 999;
+            s_ecg_display = (uint16_t)ecg_disp;
 
             s_ecg_buf[s_ecg_idx++] = (int16_t)filtered;
 
@@ -110,7 +145,6 @@ int main(void)
             {
                 uint16_t total = g_cmd_pkt_samples;
                 s_ecg_idx = 0;
-                /* Split into ECG_MAX_SAMPLES-sample BLE notifications */
                 for (uint16_t off = 0; off < total; off += ECG_MAX_SAMPLES)
                 {
                     uint16_t chunk = total - off;
@@ -129,15 +163,79 @@ int main(void)
             }
         }
 
-        /* ── Sensor tick (CONTINUOUS and PERIODIC modes) ── */
+        /* ── Sensor tick (10 ms CONTINUOUS / g_period_ms PERIODIC) ── */
         if (g_sensor_tick)
         {
             g_sensor_tick = false;
+            now_ms = timer2_now() / 1000;
 
-            m_xfer_done = true;     /* guard: only start if bus is free */
-            max30102_cal();         /* reads MAX30102 FIFO, updates g_ppg via RF algo */
-            MMA8452Q_read();        /* updates g_accel */
-            tmp117_poll();          /* reads TMP117 if ALERT fired, updates g_temp */
+            /* ── MAX30102: read FIFO, compute when buffer full ── */
+            if (s_ppg_present)
+            {
+                int n = max30102_read_samples(s_ir_buf + s_ppg_count,
+                                              s_red_buf + s_ppg_count,
+                                              PPG_BUF_SIZE - s_ppg_count);
+                s_ppg_count += n;
+
+                if (s_ppg_count >= PPG_BUF_SIZE)
+                {
+                    float hr = 0.0f, spo2 = 0.0f;
+                    if (max30102_compute(s_ir_buf, s_red_buf, s_ppg_count, &hr, &spo2))
+                    {
+                        g_sensor.hr_ppg = (uint8_t)hr;
+                        g_sensor.spo2   = (uint8_t)spo2;
+                        s_dash.hr       = hr;
+                        s_dash.spo2     = spo2;
+                        dashboard_update_hr(&s_dash);
+                    }
+                    s_ppg_count = 0;
+                }
+            }
+
+            /* ── Accelerometer → pedometer + LCD wake ── */
+            if (s_accel_present)
+            {
+                MMA8452Q_read();
+                pedometer_update(&g_pedometer, g_accel.ac, now_ms);
+
+                g_sensor.steps   = pedometer_get_steps(&g_pedometer);
+                g_sensor.cadence = pedometer_get_cadence(&g_pedometer, now_ms);
+
+                s_dash.steps        = g_sensor.steps;
+                s_dash.cadence      = g_sensor.cadence;
+                s_dash.timestamp_ms = now_ms;
+            }
+
+            dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
+            dashboard_update_ecg(&s_dash, s_ecg_display);
+
+            /* ── TMP117 one-shot state machine ── */
+            if (s_tmp_present)
+            {
+                if (!s_tmp_triggered)
+                {
+                    tmp117_wake_oneshot();
+                    s_tmp_triggered  = true;
+                    s_tmp_trigger_ms = now_ms;
+                }
+                else if ((now_ms - s_tmp_trigger_ms) >= 200)
+                {
+                    float raw_temp = tmp117_get_Temp();
+                    tmp117_shutdown_mode();
+                    s_tmp_triggered = false;
+
+                    if (raw_temp > TMP117_TEMP_INVALID + 1.0f)
+                    {
+                        float ft = temp_filter_update(&g_temp_filter, raw_temp);
+                        g_sensor.temp      = ft;
+                        g_sensor.temp_valid = true;
+
+                        s_dash.temperature = ft;
+                        s_dash.temp_valid  = true;
+                        dashboard_update_temp(&s_dash);
+                    }
+                }
+            }
 
             if (ble_app_is_connected())
             {

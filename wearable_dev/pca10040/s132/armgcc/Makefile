@@ -63,10 +63,11 @@ SRC_FILES += \
   $(PROJ_DIR)/storage/flash_user.c \
   $(PROJ_DIR)/drivers/accel/mma845.c \
   $(PROJ_DIR)/drivers/accel/accel_filter.c \
+  $(PROJ_DIR)/drivers/accel/pedometer.c \
   $(PROJ_DIR)/drivers/ppg/max.c \
   $(PROJ_DIR)/drivers/ppg/spo2_algorithm.c \
-  $(PROJ_DIR)/drivers/ppg/algorithm_by_RF.c \
-  $(PROJ_DIR)/drivers/temp/tmp117.c \
+  $(PROJ_DIR)/drivers/temp/tmp117_v2.c \
+  $(PROJ_DIR)/drivers/temp/temp_filter.c \
   $(PROJ_DIR)/drivers/display/GC9A01.c \
   $(PROJ_DIR)/drivers/display/dashboard.c \
   $(PROJ_DIR)/drivers/display/lcd_power.c \
