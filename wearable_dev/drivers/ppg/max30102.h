@@ -8,6 +8,10 @@
 #define I2C_ADDR_MAX30102             0x57
 
 /* ── Register map ────────────────────────────── */
+#define INTERRUPT_STATUS_1_REGISTER 0x00
+#define INTERRUPT_STATUS_2_REGISTER 0x01
+#define INTERRUPT_ENABLE_1_REGISTER 0x02
+#define INTERRUPT_ENABLE_2_REGISTER 0x03
 #define FIFO_WRITE_POINTER_REGISTER   0x04
 #define OVER_FLOW_COUNTER_REGISTER    0x05
 #define FIFO_READ_POINTER_REGISTER    0x06
@@ -33,6 +37,8 @@ void max30102_wakeup(void);
 /* Read available FIFO samples into caller-supplied buffers.
  * Returns number of samples read (0 on I2C error or empty FIFO). */
 int  max30102_read_samples(uint32_t *ir_buf, uint32_t *red_buf, int max_samples);
+
+bool max30102_read_1_sample(uint32_t *ir, uint32_t *red);
 
 /* Compute HR and SpO2 from a filled sample buffer.
  * Returns true and fills *hr_out / *spo2_out when result is valid. */

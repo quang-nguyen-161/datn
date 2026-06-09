@@ -78,7 +78,7 @@ bool tmp117_Init(void)
     }
 
     if (device_id != TMP117_DEVICE_ID) {
-        NRF_LOG_ERROR("TMP117: Not found (tried 0x48–0x4B)");
+        NRF_LOG_WARNING("TMP117: Not found");
         return false;
     }
 

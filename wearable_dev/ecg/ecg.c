@@ -10,11 +10,14 @@
 #include "nrf_log_ctrl.h"
 
 /* ================================================================
- *  Shared globals (set in ISR, read in main loop)
+ *  Shared result struct (filled by ecg_process, consumed in main loop)
+ *  g_ecg_raw / g_ecg_ready are the ISR-side capture globals — defined
+ *  and read out (saadc_callback) in main.c, declared extern in ecg.h.
  * ================================================================ */
-volatile int16_t g_ecg_raw   = 0;
-volatile bool    g_ecg_ready = false;
 ecg_result_t     g_ecg       = {0};
+
+/* Defined in main.c — registered with the SAADC driver below. */
+extern void saadc_callback(nrf_drv_saadc_evt_t const *p_event);
 
 /* ================================================================
  *  Hardware resources
@@ -40,21 +43,6 @@ static delay_t        s_ale_delay;
 static sg_filter_t    s_sg;
 
 /* ================================================================
- *  SAADC callback — fires every 4 ms via PPI, minimal work here
- * ================================================================ */
-static void saadc_callback(nrf_drv_saadc_evt_t const *p_event)
-{
-    if (p_event->type != NRF_DRV_SAADC_EVT_DONE) { return; }
-
-    g_ecg_raw   = p_event->data.done.p_buffer[0];
-    g_ecg_ready = true;
-
-    ret_code_t err = nrf_drv_saadc_buffer_convert(
-        p_event->data.done.p_buffer, SAMPLES_IN_BUFFER);
-    APP_ERROR_CHECK(err);
-}
-
-/* ================================================================
  *  SAADC init — 12-bit, AIN0, GAIN1_6, internal 0.6 V ref
  *  AD8232 output 0.5–2.5 V fits inside 3.6 V full-scale range
  * ================================================================ */
@@ -65,11 +53,11 @@ static void saadc_init(void)
     ch.reference = NRF_SAADC_REFERENCE_INTERNAL;
     ch.acq_time  = NRF_SAADC_ACQTIME_20US;
     ch.mode      = NRF_SAADC_MODE_SINGLE_ENDED;
-    ch.burst     = NRF_SAADC_BURST_ENABLED;
+    ch.burst     = NRF_SAADC_BURST_DISABLED;
 
     nrf_drv_saadc_config_t cfg = NRF_DRV_SAADC_DEFAULT_CONFIG;
     cfg.resolution = NRF_SAADC_RESOLUTION_12BIT;
-    cfg.oversample = NRF_SAADC_OVERSAMPLE_4X;
+    cfg.oversample = NRF_SAADC_OVERSAMPLE_DISABLED;
 
     ret_code_t err;
     err = nrf_drv_saadc_init(&cfg, saadc_callback);      APP_ERROR_CHECK(err);
@@ -132,7 +120,7 @@ void ecg_init(void)
 
     saadc_init();
     ppi_init();
-    NRF_LOG_INFO("ECG: 250 Hz PPI sampling started (BP -> ALE -> SG pipeline)");
+    NRF_LOG_INFO("ECG: 250 Hz PPI sampling");
     NRF_LOG_FLUSH();
 }
 

@@ -408,11 +408,6 @@
               <FileType>5</FileType>
               <FilePath>..\..\..\ble\cus_service.h</FilePath>
             </File>
-            <File>
-              <FileName>ble_app.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\..\..\ble\ble_app.c</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
@@ -4311,11 +4306,6 @@
               <FileName>cus_service.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\..\..\ble\cus_service.h</FilePath>
-            </File>
-            <File>
-              <FileName>ble_app.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\..\..\ble\ble_app.c</FilePath>
             </File>
           </Files>
         </Group>

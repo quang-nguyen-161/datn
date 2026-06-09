@@ -5,6 +5,7 @@
 #include "nrf_drv_timer.h"
 #include "nrf_delay.h"
 #include "nrf_log.h"
+#include "nrf_log_ctrl.h"
 #include "app_error.h"
 #include <math.h>
 #include <string.h>
@@ -97,29 +98,91 @@ static void ppg_filters_init(void)
 
 bool max30102_init(void)
 {
-    /* Software reset — if NACK, sensor is absent */
-    if (!ppg_write(MODE_CONFIG_REGISTER, 0x40)) return false;
-    nrf_delay_ms(10);
+    uint8_t reg;
+    uint8_t dummy;
 
-    /* Verify device is alive after reset */
-    uint8_t mode = 0;
-    if (!ppg_read(MODE_CONFIG_REGISTER, &mode, 1)) return false;
+    NRF_LOG_INFO("[MAX30102] Reset");
+    NRF_LOG_FLUSH();
 
-    /* SpO2 mode, 100 Hz, 411 µs pulse, 16384 ADC range */
-    ppg_write(FIFO_CONFIG_REGISTER,   0x00);
-    ppg_write(MODE_CONFIG_REGISTER,   0x03);
-    ppg_write(SPO2_CONFIG_REGISTER,   (0x01 << 5) | (0x03 << 2) | 0x03);
-    ppg_write(LED_CURRENT_REGISTER_1, LED_CURRENT_LOW);
-    ppg_write(LED_CURRENT_REGISTER_2, LED_CURRENT_LOW);
+    /* Match old driver exactly */
+    ppg_write(MODE_CONFIG_REGISTER, 0x00);
+    ppg_write(MODE_CONFIG_REGISTER, 0x40);
 
-    /* Clear FIFO */
+    nrf_delay_ms(1000);
+
+    /* Old driver cleared interrupt status here */
+    ppg_read(INTERRUPT_STATUS_1_REGISTER, &dummy, 1);
+
+    /* Interrupt configuration */
+    ppg_write(INTERRUPT_ENABLE_1_REGISTER, 0xC0);
+    ppg_write(INTERRUPT_ENABLE_2_REGISTER, 0x00);
+
+    /* FIFO pointers */
+    ppg_write(FIFO_READ_POINTER_REGISTER, 0x00);
     ppg_write(FIFO_WRITE_POINTER_REGISTER, 0x00);
-    ppg_write(FIFO_READ_POINTER_REGISTER,  0x00);
-    ppg_write(OVER_FLOW_COUNTER_REGISTER,  0x00);
+    ppg_write(OVER_FLOW_COUNTER_REGISTER, 0x00);
+
+    /* Same FIFO config as old driver */
+    ppg_write(FIFO_CONFIG_REGISTER, 0x0F);
+
+    /* SpO2 mode */
+    ppg_write(MODE_CONFIG_REGISTER, 0x03);
+
+    /* Exact value from previous debug version */
+    ppg_write(SPO2_CONFIG_REGISTER, 0x27);
+
+    /* Increase LED current for debugging */
+    ppg_write(LED_CURRENT_REGISTER_1, 0x1F);
+    ppg_write(LED_CURRENT_REGISTER_2, 0x1F);
+
+    /* Read back everything */
+    ppg_read(MODE_CONFIG_REGISTER, &reg, 1);
+    NRF_LOG_INFO("MODE=0x%02X", reg);
+
+    ppg_read(SPO2_CONFIG_REGISTER, &reg, 1);
+    NRF_LOG_INFO("SPO2=0x%02X", reg);
+
+    ppg_read(FIFO_CONFIG_REGISTER, &reg, 1);
+    NRF_LOG_INFO("FIFO=0x%02X", reg);
+
+    ppg_read(LED_CURRENT_REGISTER_1, &reg, 1);
+    NRF_LOG_INFO("LED1=0x%02X", reg);
+
+    ppg_read(LED_CURRENT_REGISTER_2, &reg, 1);
+    NRF_LOG_INFO("LED2=0x%02X", reg);
+
+    NRF_LOG_FLUSH();
+
+    nrf_delay_ms(1000);
+
+    uint8_t wptr, rptr;
+
+    ppg_read(FIFO_WRITE_POINTER_REGISTER, &wptr, 1);
+    ppg_read(FIFO_READ_POINTER_REGISTER, &rptr, 1);
+
+    NRF_LOG_INFO("FIFO_WR=%u", wptr);
+    NRF_LOG_INFO("FIFO_RD=%u", rptr);
+    NRF_LOG_INFO("FIFO_CNT=%d", ((32 + wptr) - rptr) % 32);
+
+    /* Dump first FIFO sample */
+    for(int i=0;i<10;i++)
+{
+    uint8_t fifo[6];
+
+    ppg_read(FIFO_DATA_REGISTER, fifo, 6);
+
+    NRF_LOG_INFO("%02X %02X %02X %02X %02X %02X",
+                 fifo[0], fifo[1], fifo[2],
+                 fifo[3], fifo[4], fifo[5]);
+
+    nrf_delay_ms(100);
+}
+
+
+    NRF_LOG_FLUSH();
 
     ppg_filters_init();
 
-    NRF_LOG_INFO("[MAX30102] Init OK");
     return true;
 }
 
@@ -147,30 +210,53 @@ void max30102_wakeup(void)
 
 int max30102_read_samples(uint32_t *ir_buf, uint32_t *red_buf, int max_samples)
 {
-    uint8_t wptr = 0, rptr = 0;
-    if (!ppg_read(FIFO_WRITE_POINTER_REGISTER, &wptr, 1) ||
-        !ppg_read(FIFO_READ_POINTER_REGISTER,  &rptr, 1))
+    if (max_samples <= 0)
         return 0;
 
-    int avail = ((MAX_FIFO_DEPTH + (int)wptr) - (int)rptr) % MAX_FIFO_DEPTH;
-    if (avail <= 0) return 0;
-    if (avail > max_samples)    avail = max_samples;
-    if (avail > MAX_FIFO_DEPTH) avail = MAX_FIFO_DEPTH;
+    if (max_samples > MAX_FIFO_DEPTH)
+        max_samples = MAX_FIFO_DEPTH;
 
     uint8_t raw[MAX_FIFO_DEPTH * 6];
-    if (!ppg_read(FIFO_DATA_REGISTER, raw, (uint16_t)(6 * avail))) return 0;
 
-    for (int i = 0; i < avail; i++) {
-        red_buf[i] = (((uint32_t)raw[6*i]   << 16) |
-                      ((uint32_t)raw[6*i+1]  << 8)  |
-                       (uint32_t)raw[6*i+2]) & 0x03FFFFUL;
-        ir_buf[i]  = (((uint32_t)raw[6*i+3] << 16) |
-                      ((uint32_t)raw[6*i+4]  << 8)  |
-                       (uint32_t)raw[6*i+5]) & 0x03FFFFUL;
+    if (!ppg_read(FIFO_DATA_REGISTER, raw, 6 * max_samples))
+        return 0;
+
+    for (int i = 0; i < max_samples; i++)
+    {
+        red_buf[i] =
+            (((uint32_t)raw[6*i]   << 16) |
+             ((uint32_t)raw[6*i+1] << 8)  |
+              (uint32_t)raw[6*i+2]) & 0x03FFFFUL;
+
+        ir_buf[i] =
+            (((uint32_t)raw[6*i+3] << 16) |
+             ((uint32_t)raw[6*i+4] << 8)  |
+              (uint32_t)raw[6*i+5]) & 0x03FFFFUL;
     }
-    return avail;
+
+    return max_samples;
 }
 
+bool max30102_read_1_sample(uint32_t *ir, uint32_t *red)
+{
+    if (ir == NULL || red == NULL)
+        return false;
+
+    uint8_t raw[6];
+
+    if (!ppg_read(FIFO_DATA_REGISTER, raw, sizeof(raw)))
+        return false;
+
+    *red = (((uint32_t)raw[0] << 16) |
+            ((uint32_t)raw[1] << 8)  |
+             (uint32_t)raw[2]) & 0x03FFFFUL;
+
+    *ir  = (((uint32_t)raw[3] << 16) |
+            ((uint32_t)raw[4] << 8)  |
+             (uint32_t)raw[5]) & 0x03FFFFUL;
+
+    return true;
+}
 /* ══════════════════════════════════════════════════════════
  *  DSP — HR and SpO2 from accumulated raw buffer
  *

@@ -1,7 +1,8 @@
 #include "cus_service.h"
-
+#include "nrf_log.h"
 #define BLE_NUS_MAX_RX_CHAR_LEN        BLE_NUS_MAX_DATA_LEN /**< Maximum length of the RX Characteristic (in bytes). */
 #define BLE_NUS_MAX_TX_CHAR_LEN        BLE_NUS_MAX_DATA_LEN /**< Maximum length of the TX Characteristic (in bytes). */
+
 
 static void on_write(ble_cus_t * p_cus, ble_evt_t const * p_ble_evt)
 {
@@ -149,6 +150,6 @@ uint32_t ble_cus_data_send(ble_cus_t * p_cus,
     hvx_params.p_data = p_data;
     hvx_params.p_len  = p_length;
     hvx_params.type   = BLE_GATT_HVX_NOTIFICATION;
-
+	
     return sd_ble_gatts_hvx(conn_handle, &hvx_params);	
 }

@@ -5,7 +5,7 @@
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 
-#include "ble_app.h"
+#include "main.h"
 
 /* ══════════════════════════════════════════════════════════════
  *  State
@@ -72,7 +72,9 @@ void device_mode_init(void)
     APP_ERROR_CHECK(app_timer_create(&m_sensor_timer, APP_TIMER_MODE_REPEATED, sensor_timer_cb));
     APP_ERROR_CHECK(app_timer_start(m_sensor_timer, APP_TIMER_TICKS(SENSOR_TIMER_MS), NULL));
 
+#if !SENSOR_TEST_MODE
     apply_ble_interval(g_device_mode);
+#endif
 
     NRF_LOG_INFO("device_mode_init: mode=%d period=%d ms", g_device_mode, g_period_ms);
     NRF_LOG_FLUSH();
