@@ -19,15 +19,27 @@
 #define SLPIN               0x10
 #define SLPOUT              0x11
 
-// Pins — nRF52840 custom board (QFN48)
-// Port 1 pins use NRF_GPIO_PIN_MAP(1, x) = 32 + x
-#define LCD_MISO_PIN        NRF_SPI_PIN_NOT_CONNECTED  // không dùng
-#define LCD_MOSI_PIN        NRF_GPIO_PIN_MAP(0, 7)       // P0.05 SDA_LCD (data)
-#define LCD_SCK_PIN         NRF_GPIO_PIN_MAP(0, 5)      // P0.04 SCL_LCD (clock)
-#define LCD_CS_Pin          NRF_GPIO_PIN_MAP(1, 9)     // P1.09 = NRF_GPIO_PIN_MAP(1,9)
-#define LCD_DC_Pin          NRF_GPIO_PIN_MAP(1, 8)       // P0.08 DC
-#define LCD_RES_Pin         NRF_GPIO_PIN_MAP(0, 8)      // P0.07 RES (reset)
-#define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 11)      // P1.08 = NRF_GPIO_PIN_MAP(1,8) Backlight
+// Pins — board-specific
+// nRF52840 (pca10056) has Port 1; nRF52832 (pca10040) is Port 0 only.
+#define LCD_MISO_PIN        NRF_SPI_PIN_NOT_CONNECTED
+
+#if defined(NRF52840_XXAA)
+/* pca10056 — nRF52840 QFN48 custom board */
+#define LCD_MOSI_PIN        NRF_GPIO_PIN_MAP(0, 7)   // P0.07 SDA_LCD
+#define LCD_SCK_PIN         NRF_GPIO_PIN_MAP(0, 5)   // P0.05 SCL_LCD
+#define LCD_CS_Pin          NRF_GPIO_PIN_MAP(1, 9)   // P1.09 CS
+#define LCD_DC_Pin          NRF_GPIO_PIN_MAP(1, 8)   // P1.08 DC
+#define LCD_RES_Pin         NRF_GPIO_PIN_MAP(0, 8)   // P0.08 RES
+#define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 11)  // P0.11 BLK
+#else
+/* pca10040 — nRF52832: all pins must be Port 0 (0–31) */
+#define LCD_MOSI_PIN        NRF_GPIO_PIN_MAP(0, 7)   // P0.07 SDA_LCD
+#define LCD_SCK_PIN         NRF_GPIO_PIN_MAP(0, 5)   // P0.05 SCL_LCD
+#define LCD_CS_Pin          NRF_GPIO_PIN_MAP(0, 25)  // P0.25 CS
+#define LCD_DC_Pin          NRF_GPIO_PIN_MAP(0, 24)  // P0.24 DC
+#define LCD_RES_Pin         NRF_GPIO_PIN_MAP(0, 8)   // P0.08 RES
+#define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 11)  // P0.11 BLK
+#endif
 
 // Colors
 #define	BLACK               0x0000
@@ -61,7 +73,7 @@ struct GC9A01_frame {
 };
 
 /* Hardware and soft func  */
-void lcd_spi_init(void);
+bool lcd_spi_init(void);   /* returns false if SPI init fails (LCD not present) */
 void GC9A01_init(void);
 void GC9A01A_sleep_mode(uint8_t Mode);
 void GC9A01_spi_tx(uint8_t *data, size_t len);

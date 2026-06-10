@@ -34,7 +34,7 @@ T_END    = 28.0    # seconds  (set to None for full recording)
 # Example: [5, 6] overlays the Python replay's final stage with the firmware's
 # own logged output, to see how closely the replay matches the real device.
 # Set to None or [] to skip the combined overlay plot.
-PSD_COMPARE_STAGES = [1,2,3,4,5,6]
+PSD_COMPARE_STAGES = [1,5,6]
 
 Fs            = 250.0
 HP_HZ         = 1.0

@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  thingsboard:
+    image: thingsboard/tb-postgres
+    container_name: thingsboard
+    restart: always
+    ports:
+      - "9090:9090"   # HTTP UI + REST API
+      - "1883:1883"   # MQTT
+      - "7070:7070"   # CoAP
+      - "8083:8083"   # MQTT over WebSockets
+    environment:
+      TB_QUEUE_TYPE: in-memory
+    volumes:
+      - tb-data:/data
+      - tb-logs:/var/log/thingsboard
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+volumes:
+  tb-data:
+    driver: local
+  tb-logs:
+    driver: local

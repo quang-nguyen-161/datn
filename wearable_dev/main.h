@@ -10,7 +10,7 @@
 /* ── Single-sensor test mode ──
  * Define exactly one to isolate that sensor for bring-up/debug
  * (BLE/advertising disabled); leave all undefined for normal operation. */
-#define TEST_SENSOR_MAX
+//#define TEST_SENSOR_MAX
  //#define TEST_SENSOR_TMP
 // #define TEST_SENSOR_ECG
 
@@ -61,7 +61,7 @@ bool twi_wait(void);  /* spin-wait with 200k-cycle timeout; resets bus on timeou
  * ════════════════════════════════════════════════════════════ */
 extern nrf_drv_spi_t    m_lcd_spi;
 
-void lcd_spi_init(void);        /* defined in drivers/display/GC9A01.c */
+bool lcd_spi_init(void);        /* defined in drivers/display/GC9A01.c; returns false if LCD absent */
 
 /* ══════════════════════════════════════════════════════════════
  *  BLE — stack init, GAP/GATT, advertising, custom service

@@ -1,5 +1,5 @@
 #include "tmp117_v2.h"
-
+#include "nrf_log_ctrl.h"
 #include "app_error.h"
 #include "nrf_drv_twi.h"
 #include "nrf_delay.h"
@@ -85,9 +85,14 @@ bool tmp117_Init(void)
     NRF_LOG_INFO("TMP117 found at 0x%02X", MyTMP117_DeviceID);
 
     tmp117_set_Config(0x02, 0x20);
+		
     tmp117_set_Temp_Offset(0x00, 0x00);
+		nrf_delay_ms(100);
+		
     tmp117_set_LowLimit(0x16, 0x80);
+		
     tmp117_set_HighLimit(0x1E, 0x00);
+		
     return true;
 }
 

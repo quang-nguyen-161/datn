@@ -19,7 +19,8 @@ extern volatile int16_t g_ecg_raw;
 extern volatile bool    g_ecg_ready;
 
 /* ── Init ── */
-void ecg_init(void);        /* call after ble_app_init(); arms TIMER3→PPI→SAADC at 250 Hz */
+void ecg_init(void);
+void ecg_set_sample_us(uint32_t us); /* live-reconfigure TIMER3 compare rate (e.g. 4000 = 250 Hz) */
 
 /* ── Signal processing ── */
 float ecg_process(int16_t raw);   /* bandpass(1–25 Hz) → ALE-NLMS → Savitzky-Golay; returns filtered sample */

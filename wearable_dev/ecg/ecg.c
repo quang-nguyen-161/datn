@@ -32,12 +32,14 @@ static nrf_ppi_channel_t     m_ppi_chan;
 
 /* ================================================================
  *  ECG filter states (private to this module)
- *  Pipeline: bandpass (4th-order Butter, 1–25 Hz)
+ *  Pipeline: 4th-order notch (2× Q=10 @ 50 Hz)
+ *            → bandpass (4th-order Butter, 1–25 Hz)
  *            → ALE-NLMS (adaptive line enhancer)
  *            → Savitzky-Golay (window=11, poly=3)
  * ================================================================ */
-static biquad_df2t_t  s_hpf1, s_hpf2;      /* 2× 2nd-order HP at 1 Hz  */
-static biquad_df2t_t  s_lpf1_ecg, s_lpf2_ecg; /* 2× 2nd-order LP at 25 Hz */
+static biquad_df2t_t  s_notch1, s_notch2;         /* 2× 2nd-order notch, Q=10, 50 Hz → 4th-order */
+static biquad_df2t_t  s_hpf1, s_hpf2;             /* 2× 2nd-order HP at 1 Hz  */
+static biquad_df2t_t  s_lpf1_ecg, s_lpf2_ecg;     /* 2× 2nd-order LP at 25 Hz */
 static nlms_t         s_nlms;
 static delay_t        s_ale_delay;
 static sg_filter_t    s_sg;
@@ -108,6 +110,10 @@ static void ppi_init(void)
  * ================================================================ */
 void ecg_init(void)
 {
+    /* 4th-order notch @ 50 Hz: two cascaded 2nd-order sections, Q=10 */
+    notch2_coeffs(250.0f, 50.0f, 10.0f, &s_notch1);
+    notch2_coeffs(250.0f, 50.0f, 10.0f, &s_notch2);
+
     /* Bandpass: 4th-order Butterworth 1–25 Hz (2× HP + 2× LP biquads) */
     butter2_hp_coeffs(250.0f, 1.0f,  &s_hpf1);
     butter2_hp_coeffs(250.0f, 1.0f,  &s_hpf2);
@@ -125,7 +131,7 @@ void ecg_init(void)
 }
 
 /* ================================================================
- *  Simplified Pan-Tompkins R-peak detector
+ *  R-peak detector v1 — simplified Pan-Tompkins adaptive threshold
  *  Adaptive threshold: decays toward 0 when no beat, spikes up on detection.
  *  Returns non-zero BPM on beat, 0 otherwise.
  * ================================================================ */
@@ -165,15 +171,92 @@ static uint8_t rpeak_detect(float x)
     return 0;
 }
 
+/* ================================================================
+ *  R-peak detector v2 — derivative-square + adaptive envelope + median RR
+ *  Scaled to 250 Hz. Runs on the same SG-filtered output as v1.
+ *  Takes precedence over v1 when it fires (more noise-robust BPM).
+ * ================================================================ */
+#define RPEAK2_REFRACT   62          /* 250 ms refractory @ 250 Hz      */
+#define RR2_BUF_SIZE      8
+#define RR2_MIN_SAMPLES  75          /* 200 BPM max @ 250 Hz            */
+#define RR2_MAX_SAMPLES  375         /* 40 BPM min  @ 250 Hz            */
+
+static float    s_env_peak2  = 0.0f;
+static uint32_t s_rr2_buf[RR2_BUF_SIZE] = {200,200,200,200,200,200,200,200};
+static int      s_rr2_head   = 0;
+static uint32_t s_last_peak2 = 0;
+static uint32_t s_sample2    = 0;
+static int      s_cooldown2  = 0;
+
+static uint8_t rpeak_detect_v2(float val)
+{
+    s_sample2++;
+
+    static float last_val = 0.0f;
+    float diff = val - last_val;
+    last_val   = val;
+    float sq   = diff * diff;
+
+    /* Adaptive envelope: instant attack, slow 0.992/sample decay */
+    if (sq > s_env_peak2) s_env_peak2 = sq;
+    else                  s_env_peak2 *= 0.992f;
+
+    float thr = s_env_peak2 * 0.4f;
+    if (thr < 1.0f) thr = 1.0f;    /* floor: ~1 (ADC-unit/sample)^2 */
+
+    if (s_cooldown2 > 0) { s_cooldown2--; return 0; }
+
+    if (sq > thr)
+    {
+        uint32_t rr = s_sample2 - s_last_peak2;
+        s_last_peak2 = s_sample2;
+        s_cooldown2  = RPEAK2_REFRACT;
+
+        if (rr >= RR2_MIN_SAMPLES && rr <= RR2_MAX_SAMPLES)
+        {
+            s_rr2_buf[s_rr2_head] = rr;
+            s_rr2_head = (s_rr2_head + 1) % RR2_BUF_SIZE;
+
+            /* Median of 8 RR intervals — bubble sort on local copy */
+            uint32_t tmp[RR2_BUF_SIZE];
+            memcpy(tmp, s_rr2_buf, sizeof(tmp));
+            for (int i = 0; i < RR2_BUF_SIZE - 1; i++)
+                for (int j = 0; j < RR2_BUF_SIZE - 1 - i; j++)
+                    if (tmp[j] > tmp[j+1]) {
+                        uint32_t t = tmp[j]; tmp[j] = tmp[j+1]; tmp[j+1] = t;
+                    }
+
+            uint32_t med_rr = (tmp[3] + tmp[4]) / 2;
+            if (med_rr > 0)
+                return (uint8_t)(15000u / med_rr);  /* 60 × 250 / rr */
+        }
+    }
+    return 0;
+}
+
+void ecg_set_sample_us(uint32_t us)
+{
+    uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, us);
+    nrf_drv_timer_extended_compare(&m_saadc_timer,
+                                   NRF_TIMER_CC_CHANNEL0,
+                                   ticks,
+                                   NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
+                                   false);
+}
+
 float ecg_process(int16_t raw)
 {
     float x = (float)raw;
 
+    /* 4th-order notch @ 50 Hz (2 cascaded biquads, Q=10) */
+    x = biquad_step(&s_notch1,    x);
+    x = biquad_step(&s_notch2,    x);
+
     /* Bandpass: 4th-order Butterworth 1–25 Hz */
-    x = biquad_step(&s_hpf1,    x);
-    x = biquad_step(&s_hpf2,    x);
-    x = biquad_step(&s_lpf1_ecg, x);
-    x = biquad_step(&s_lpf2_ecg, x);
+    x = biquad_step(&s_hpf1,      x);
+    x = biquad_step(&s_hpf2,      x);
+    x = biquad_step(&s_lpf1_ecg,  x);
+    x = biquad_step(&s_lpf2_ecg,  x);
 
     /* ALE-NLMS: adaptive line enhancer — attenuates narrowband interference */
     x = ale_process(&s_nlms, &s_ale_delay, x);
@@ -181,8 +264,9 @@ float ecg_process(int16_t raw)
     /* Savitzky-Golay: smooth transients while preserving QRS peak shape */
     x = sg_step(&s_sg, x);
 
+    /* R-peak v1: Pan-Tompkins adaptive threshold */
     uint8_t bpm = rpeak_detect(x);
-    if (bpm > 0) { g_sensor.hr_ecg = bpm; }
+    if (bpm > 0) g_sensor.hr_ecg = bpm;
 
     g_ecg.raw      = raw;
     g_ecg.filtered = x;

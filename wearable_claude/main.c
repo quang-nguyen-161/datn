@@ -1,43 +1,15 @@
-/**
- * @file    main_ecg_ble_ppi.c
- * @brief   ECG acquisition on nRF52832 � SAADC driven by PPI+TIMER (no CPU polling)
- *          with BLE notification of filtered samples.
- *
- * Root cause of "no ECG on nRF but works on ESP32":
- *   1. Polling blocked timing: busy-wait in get_ecg_polling() distorts 250 Hz cadence.
- *   2. saadc_sampling_event_init / enable were commented out ? PPI never armed.
- *   3. TIMER1 conflict: APP_PWM_INSTANCE(PWM1,1) and old m_timer both claimed TIMER1.
- *      Fix: SAADC PPI now uses TIMER3.
- *   4. ecg * 0.01f scale is fine for DC-remove but verify your AD8232 bias is
- *      inside [0 � 3.6 V] (GAIN1_6 + internal 0.6 V ref).
- *
- * Signal chain (250 Hz):
- *   raw ADC  ?  �scale  ?  dc_remove  ?  notch50  ?  lpf2_ecg (�2 biquad)  ?  BLE notify
- */
-
-/* ------------------------------------------------------------------ */
-/*  Includes                                                           */
-/* ------------------------------------------------------------------ */
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "boards.h"
-#include "app_util_platform.h"
 #include "app_error.h"
 #include "nrf_drv_twi.h"
-#include "nrf_drv_ppi.h"
-#include "nrf_delay.h"
 #include "nrf_drv_saadc.h"
-#include "nrf_drv_timer.h"
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 
-/* BLE */
 #include "nordic_common.h"
-#include "nrf.h"
 #include "ble_hci.h"
 #include "ble_advdata.h"
 #include "ble_advertising.h"
@@ -48,15 +20,134 @@
 #include "nrf_ble_gatt.h"
 #include "nrf_ble_qwr.h"
 #include "app_timer.h"
-#include "bsp_btn_ble.h"
 #include "nrf_pwr_mgmt.h"
-#include "cus_service.h"
 
-/* DSP / drivers */
-#include "filter.h"
-#include "dashboard.h"   /* timer2_init(), timer2_now() */
-#include "max.h"
+#include "main.h"
+#include "cus_service.h"
+#include "ecg.h"
 #include "cmd.h"
+#include "max.h"            /* max30102_init/read_samples/compute, timer2_init/now */
+#include "mma845.h"         /* MMA8452Q_init(), MMA8452Q_read(), g_accel */
+#include "tmp117_v2.h"      /* tmp117_Init(), tmp117_wake_oneshot(), tmp117_get_Temp() */
+#include "temp_filter.h"    /* temp_filter_t, temp_filter_update() */
+#include "pedometer.h"      /* pedometer_t, pedometer_update() */
+#include "dashboard.h"      /* dashboard_data_t, dashboard_update_* */
+#include "device_mode.h"
+
+/* ================================================================
+ *  Peripheral instances — declared extern in main.h
+ * ================================================================ */
+#define TWI_SCL_PIN  29
+#define TWI_SDA_PIN  28
+
+nrf_drv_twi_t    m_twi        = NRF_DRV_TWI_INSTANCE(1);
+volatile bool    m_xfer_done  = false;
+volatile bool    m_xfer_error = false;
+static bool m_notify_enabled = false;
+nrf_drv_spi_t    m_lcd_spi    = NRF_DRV_SPI_INSTANCE(0);
+sensor_data_t    g_sensor     = {0};
+
+/* ================================================================
+ *  ECG ADC capture — read out here, hardware armed by ecg_init()
+ *  (saadc_init/ppi_init in ecg.c register this callback; it fires
+ *  every 4 ms (250 Hz) and just stashes the raw sample for the
+ *  main loop, which calls ecg_process() to run the DSP chain).
+ * ================================================================ */
+volatile int16_t g_ecg_raw   = 0;
+volatile bool    g_ecg_ready = false;
+
+void saadc_callback(nrf_drv_saadc_evt_t const *p_event)
+{
+    if (p_event->type != NRF_DRV_SAADC_EVT_DONE) { return; }
+
+    g_ecg_raw   = p_event->data.done.p_buffer[0];
+    g_ecg_ready = true;
+
+    /* Re-queue the same buffer; matches SAMPLES_IN_BUFFER (1) in ecg.c */
+    ret_code_t err = nrf_drv_saadc_buffer_convert(p_event->data.done.p_buffer, 1);
+    APP_ERROR_CHECK(err);
+}
+
+void twi_handler(nrf_drv_twi_evt_t const *p_event, void *p_context)
+{
+    (void)p_context;
+    if (p_event->type == NRF_DRV_TWI_EVT_ADDRESS_NACK ||
+        p_event->type == NRF_DRV_TWI_EVT_DATA_NACK) {
+        m_xfer_error = true;
+    }
+    m_xfer_done = true;
+}
+
+/* Spin-waits for the in-flight IRQ-driven transfer to complete.
+ * Timeout ~5 ms at 64 MHz. Resets peripheral if IRQ never fires. */
+bool twi_wait(void)
+{
+    uint32_t timeout = 200000;
+    while (!m_xfer_done && --timeout);
+    if (!timeout) {
+        nrf_drv_twi_disable(&m_twi);
+        nrf_drv_twi_enable(&m_twi);
+    }
+    bool ok = m_xfer_done && !m_xfer_error;
+    m_xfer_done  = false;
+    m_xfer_error = false;
+    return ok;
+}
+
+void twi_init(void)
+{
+    const nrf_drv_twi_config_t cfg = {
+        .scl                = TWI_SCL_PIN,
+        .sda                = TWI_SDA_PIN,
+        .frequency          = NRF_DRV_TWI_FREQ_400K,
+        .interrupt_priority = APP_IRQ_PRIORITY_HIGH,
+        .clear_bus_init     = false
+    };
+    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, twi_handler, NULL);
+    APP_ERROR_CHECK(err);
+    nrf_drv_twi_enable(&m_twi);
+}
+
+/* ================================================================
+ *  BLE packet helpers
+ * ================================================================ */
+static int16_t  s_ecg_buf[ECG_BUF_SAMPLES];
+static uint16_t s_ecg_idx = 0;
+
+static void send_vitals_packet(void)
+{
+    float pkt[4] = {
+        g_sensor.hr_ecg,
+        g_sensor.hr_ppg,
+        g_sensor.spo2,
+        g_sensor.temp
+    };
+
+    ble_app_send((uint8_t *)pkt, sizeof(pkt));
+}
+/* ================================================================
+ *  Sensor state
+ * ================================================================ */
+static pedometer_t      g_pedometer;
+static temp_filter_t    g_temp_filter;
+static dashboard_data_t s_dash;
+static uint16_t         s_ecg_display = 500;  /* ECG mapped to 0–999 for LCD */
+
+/* Sensor presence — set at init, guards all tick reads */
+static bool s_ppg_present   = false;
+static bool s_accel_present = false;
+static bool s_tmp_present   = false;
+
+/* MAX30102 sample accumulation — filled at 100 Hz (1 sample / 10 ms tick) */
+#define PPG_BUF_SIZE 100
+static uint32_t s_ir_buf[PPG_BUF_SIZE];
+static uint32_t s_red_buf[PPG_BUF_SIZE];
+static int      s_ppg_count = 0;
+
+/* TMP117 one-shot state machine */
+static bool     s_tmp_triggered  = false;
+static uint32_t s_tmp_trigger_ms = 0;
+
 /* ------------------------------------------------------------------ */
 /*  BLE configuration                                                  */
 /* ------------------------------------------------------------------ */
@@ -75,43 +166,8 @@
 #define MAX_CONN_PARAMS_UPDATE_COUNT    3
 #define DEAD_BEEF                   0xDEADBEEF
 
-/* ------------------------------------------------------------------ */
-/*  Hardware                                                           */
-/* ------------------------------------------------------------------ */
-#define TWI_SCL_PIN     29
-#define TWI_SDA_PIN     28
-
-/* ------------------------------------------------------------------ */
-/*  SAADC / PPI                                                        */
-/* ------------------------------------------------------------------ */
-#define SAMPLES_IN_BUFFER   1
-/* Defaults — overridden at runtime via BLE write from gateway */
-#define SAADC_SAMPLE_US_DEFAULT  4000U   /* 250 Hz */
 #define PACKET_SAMPLES_DEFAULT   50U     /* 250 Hz x 200 ms */
 #define PACKET_SAMPLES_MAX       128U    /* hard cap: 256 bytes < any negotiated MTU */
-
-/* Command byte constants and shared state live in cmd.h / cmd.c */
-
-/*  Use TIMER3 � TIMER0 reserved by SD, TIMER1 used by PWM, TIMER2 by timer2_now() */
-static const nrf_drv_timer_t   m_saadc_timer = NRF_DRV_TIMER_INSTANCE(3);
-static nrf_saadc_value_t       m_buf[2][SAMPLES_IN_BUFFER];
-static nrf_ppi_channel_t       m_ppi_chan;
-
-/* ------------------------------------------------------------------ */
-/*  ECG packet buffering for BLE                                       */
-/* ------------------------------------------------------------------ */
-/* 50 samples × 2 bytes = 100-byte payload; at 250 Hz → one notify every 200 ms */
-static int16_t  s_send_buf[PACKET_SAMPLES_MAX];
-static uint8_t  s_send_idx = 0;
-
-/* Shared between ISR and main � use volatile */
-volatile int16_t  g_ecg_raw      = 0;
-volatile float    g_ecg_filtered = 0.0f;
-volatile bool     g_ecg_ready    = false;
-
-/* Runtime ECG config (default 250 Hz / 200 ms) */
-static volatile uint32_t g_saadc_sample_us  = SAADC_SAMPLE_US_DEFAULT;
-static volatile uint16_t g_packet_samples   = PACKET_SAMPLES_DEFAULT;
 
 /* ECG reconfiguration pending — written by cmd_rx_handle(), consumed here */
 /* g_cmd_cfg_pending, g_cmd_sample_us, g_cmd_pkt_samples defined in cmd.c  */
@@ -127,368 +183,6 @@ BLE_ADVERTISING_DEF(m_advertising);
 static uint16_t   m_conn_handle        = BLE_CONN_HANDLE_INVALID;
 static uint16_t   m_ble_max_data_len   = BLE_GATT_ATT_MTU_DEFAULT - 3;
 static ble_uuid_t m_adv_uuids[]        = { {CUS_SERVICE_UUID, NUS_SERVICE_UUID_TYPE} };
-
-/* ------------------------------------------------------------------ */
-/*  DSP state — coefficients computed at runtime via ecg_bandpass_init */
-/*  Matches Python: butter(4, [0.5, 25], 'bandpass', fs=250)          */
-/* ------------------------------------------------------------------ */
-static sg_filter_t   s_sg_ecg;
-static biquad_df2t_t s_hpf_ecg_1;   /* 0.5 Hz HP, section 1 of 2 */
-static biquad_df2t_t s_hpf_ecg_2;   /* 0.5 Hz HP, section 2 of 2 */
-static biquad_df2t_t s_notch50;     /* 50 Hz notch, Q=30          */
-static biquad_df2t_t s_lpf_ecg_1;   /* 25 Hz LP, section 1 of 2  */
-static biquad_df2t_t s_lpf_ecg_2;   /* 25 Hz LP, section 2 of 2  */
-static nlms_t        s_nlms_ecg;
-static delay_t       s_delay_ecg;
-
-/* ------------------------------------------------------------------ */
-/*  Forward declarations                                               */
-/* ------------------------------------------------------------------ */
-void log_init(void);
-void timer_init(void);
-void power_management_init(void);
-void ble_stack_init(void);
-void gap_params_init(void);
-void gatt_init(void);
-void services_init(void);
-void advertising_init(void);
-void conn_params_init(void);
-void advertising_start(void);
-void idle_state_handle(void);
-
-void saadc_init(void);
-void saadc_ppi_init(void);
-void saadc_ppi_enable(void);
-static void ecg_config_apply(void);
-
-/* TWI helpers kept for I2C sensor expansion */
-extern volatile bool m_xfer_done = false;
-static const nrf_drv_twi_t m_twi = NRF_DRV_TWI_INSTANCE(1);
-void twi_handler(nrf_drv_twi_evt_t const * p_event, void * p_context);
-void twi_init(void);
-
-
-/* ================================================================== */
-/*  SAADC PPI                                                          */
-/* ================================================================== */
-
-/**
- * @brief  Dead-simple timer handler � PPI fires the SAADC sample task,
- *         so this callback body can remain empty.
- */
-static void saadc_timer_handler(nrf_timer_event_t event_type, void *p_context)
-{
-    (void)event_type;
-    (void)p_context;
-}
-
-/**
- * @brief  Initialise TIMER3 ? PPI ? SAADC sample task chain (250 Hz).
- *         Call AFTER saadc_init().
- */
-void saadc_ppi_init(void)
-{
-    ret_code_t err_code;
-
-    /* --- PPI driver --- */
-    err_code = nrf_drv_ppi_init();
-    APP_ERROR_CHECK(err_code);
-
-    /* --- Timer --- */
-    nrf_drv_timer_config_t tcfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
-    tcfg.bit_width = NRF_TIMER_BIT_WIDTH_32;
-    err_code = nrf_drv_timer_init(&m_saadc_timer, &tcfg, saadc_timer_handler);
-    APP_ERROR_CHECK(err_code);
-
-    uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, g_saadc_sample_us);
-    nrf_drv_timer_extended_compare(
-        &m_saadc_timer,
-        NRF_TIMER_CC_CHANNEL0,
-        ticks,
-        NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
-        false);                          /* no interrupt needed */
-    nrf_drv_timer_enable(&m_saadc_timer);
-
-    /* --- PPI channel: TIMER compare ? SAADC sample --- */
-    uint32_t timer_evt  = nrf_drv_timer_compare_event_address_get(&m_saadc_timer,
-                                                                   NRF_TIMER_CC_CHANNEL0);
-    uint32_t saadc_task = nrf_drv_saadc_sample_task_get();
-
-    err_code = nrf_drv_ppi_channel_alloc(&m_ppi_chan);
-    APP_ERROR_CHECK(err_code);
-
-    err_code = nrf_drv_ppi_channel_assign(m_ppi_chan, timer_evt, saadc_task);
-    APP_ERROR_CHECK(err_code);
-}
-
-void saadc_ppi_enable(void)
-{
-    ret_code_t err_code = nrf_drv_ppi_channel_enable(m_ppi_chan);
-    APP_ERROR_CHECK(err_code);
-}
-
-/* Apply a pending ECG config: new sample rate and packet size.
- * Called from main loop only — never from ISR context. */
-static void ecg_config_apply(void)
-{
-    g_saadc_sample_us = g_cmd_sample_us;
-    g_packet_samples  = g_cmd_pkt_samples;
-    s_send_idx        = 0;   /* flush partial packet */
-
-    nrf_drv_timer_disable(&m_saadc_timer);
-    nrf_drv_timer_clear(&m_saadc_timer);
-    uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, g_saadc_sample_us);
-    nrf_drv_timer_extended_compare(
-        &m_saadc_timer, NRF_TIMER_CC_CHANNEL0, ticks,
-        NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
-    nrf_drv_timer_enable(&m_saadc_timer);
-
-    float fs = 1000000.0f / (float)g_saadc_sample_us;
-    ecg_bandpass_init(fs, 1.0f, 25.0f, 50.0f, 30.0f,
-                      &s_hpf_ecg_1, &s_hpf_ecg_2,
-                      &s_lpf_ecg_1, &s_lpf_ecg_2,
-                      &s_notch50);
-    sg_init(&s_sg_ecg);
-    nlms_init(&s_nlms_ecg, 0.005f, 1e-6f);
-    delay_init(&s_delay_ecg);
-
-    NRF_LOG_INFO("ECG recfg: %u us/smp, %u smp/pkt",
-                 (unsigned)g_saadc_sample_us, (unsigned)g_packet_samples);
-    NRF_LOG_FLUSH();
-}
-
-/**
- * @brief  SAADC event callback � fires every SAADC_SAMPLE_US �s via PPI.
- *         Heavy DSP is deferred to main loop via g_ecg_ready flag.
- */
-void saadc_callback(nrf_drv_saadc_evt_t const * p_event)
-{
-    if (p_event->type != NRF_DRV_SAADC_EVT_DONE) { return; }
-
-    /* Save raw value and re-queue buffer immediately so no samples are missed */
-    g_ecg_raw   = p_event->data.done.p_buffer[0];
-    g_ecg_ready = true;
-
-    ret_code_t err_code = nrf_drv_saadc_buffer_convert(
-        p_event->data.done.p_buffer,
-        SAMPLES_IN_BUFFER);
-    APP_ERROR_CHECK(err_code);
-}
-
-/**
- * @brief  Configure SAADC: 12-bit, AIN0, GAIN1_6, internal ref 0.6 V.
- *         Input range = 0.6 � 6 = 3.6 V full scale.
- *         AD8232 output is typically 0.5�2.5 V � fully within range.
- */
-void saadc_init(void)
-{
-    ret_code_t err_code;
-
-    nrf_saadc_channel_config_t ch = NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN0);
-    ch.gain      = NRF_SAADC_GAIN1_6;
-    ch.reference = NRF_SAADC_REFERENCE_INTERNAL;  /* 0.6 V */
-    ch.acq_time  = NRF_SAADC_ACQTIME_20US;
-    ch.mode      = NRF_SAADC_MODE_SINGLE_ENDED;
-    ch.burst     = NRF_SAADC_BURST_DISABLED;
-
-    nrf_drv_saadc_config_t cfg = NRF_DRV_SAADC_DEFAULT_CONFIG;
-    cfg.resolution = NRF_SAADC_RESOLUTION_12BIT;
-    cfg.oversample = NRF_SAADC_OVERSAMPLE_DISABLED;     /* oversampling + burst for lower noise */
-
-    err_code = nrf_drv_saadc_init(&cfg, saadc_callback);
-    APP_ERROR_CHECK(err_code);
-
-    err_code = nrf_drv_saadc_channel_init(0, &ch);
-    APP_ERROR_CHECK(err_code);
-
-    err_code = nrf_drv_saadc_buffer_convert(m_buf[0], SAMPLES_IN_BUFFER);
-    APP_ERROR_CHECK(err_code);
-    err_code = nrf_drv_saadc_buffer_convert(m_buf[1], SAMPLES_IN_BUFFER);
-    APP_ERROR_CHECK(err_code);
-
-    nrf_drv_saadc_calibrate_offset();
-}
-
-
-
-/* ================================================================== */
-/*  MAIN                                                               */
-/* ================================================================== */
-int main(void)
-{
-    log_init();
-    timer_init();
-    twi_init();
-    power_management_init();
-    ble_stack_init();
-    gap_params_init();
-    gatt_init();
-    services_init();
-    advertising_init();
-    conn_params_init();
-		nrf_gpio_cfg_output(3);
-		nrf_gpio_pin_set(3);
-
-    timer2_init();      /* free-running �s counter on TIMER2 */
-
-    saadc_init();
-    saadc_ppi_init();   /* arm TIMER3 ? PPI ? SAADC chain */
-    saadc_ppi_enable(); /* start 250 Hz autonomous sampling */
-		
-    nlms_init(&s_nlms_ecg, 0.005f, 1e-6f);
-    delay_init(&s_delay_ecg);
-    sg_init(&s_sg_ecg);
-
-    ecg_bandpass_init(250.0f, 1.0f, 25.0f, 50.0f, 10.0f,
-                      &s_hpf_ecg_1, &s_hpf_ecg_2,
-                      &s_lpf_ecg_1, &s_lpf_ecg_2,
-                      &s_notch50);
-
-    NRF_LOG_INFO("ECG PPI sampling started at 250 Hz");
-    NRF_LOG_FLUSH();
-
-    advertising_start();
-
-    /* ------------------------------------------------------------ */
-    /*  Main loop � no blocking, no busy-wait                        */
-    /* ------------------------------------------------------------ */
-    while (1)
-    {
-        if (g_cmd_cfg_pending) {
-            g_cmd_cfg_pending = false;
-            ecg_config_apply();
-            continue;
-        }
-
-        /* g_ecg_ready is set inside SAADC IRQ */
-        if (!g_ecg_ready) {
-            idle_state_handle();   /* sleep until next event */
-            continue;
-        }
-        g_ecg_ready = false;
-
-        /* --- Snapshot volatile raw value safely --- */
-        int16_t raw = g_ecg_raw;
-
-        /* -------------------------------------------------- */
-        /*  Signal chain                                        */
-        /*  raw (12-bit, ~0�4095) ? scale ? dc ? notch ? lpf  */
-        /* -------------------------------------------------- */
-
-        /*
-         * Scale: 1 LSB = 3.6 V / 4096 � 0.879 mV
-         * Multiply by 1.0 keeps units in ADC counts � dc_remove
-         * handles the large DC offset (~1800 counts for 1.65 V bias).
-         */
-        float x0 = (float)raw;
-				float x1 = biquad_step(&s_notch50,   x0);   /* 50 Hz notch      */
-				 x1 = biquad_step(&s_notch50,   x1);   /* 50 Hz notch      */
-        float x2 = biquad_step(&s_hpf_ecg_1, x1);  /* 0.5 Hz HP sect 1 */
-        float x3 = biquad_step(&s_hpf_ecg_2, x2);  /* 0.5 Hz HP sect 2 */      
-        float x4 = biquad_step(&s_lpf_ecg_1, x3);  /* 25 Hz LP sect 1  */
-        float x5 = biquad_step(&s_lpf_ecg_2, x4);  /* 25 Hz LP sect 2  */
-		
-        float x6 = ale_process(&s_nlms_ecg, &s_delay_ecg, x5);
-        float x7 = sg_step(&s_sg_ecg, x6);          /* SG smooth post-ALE */
-
-        /* -------------------------------------------------- */
-        /*  BLE: 50 samples * 2 bytes = 100-byte payload       */
-        /*  At 250 Hz -> one notification every 200 ms         */
-        /* -------------------------------------------------- */
-        #define ECG_TX_SCALE  10.0f   /* tune up if waveform is weak, down if clipping */
-
-        float  vs = x7 * ECG_TX_SCALE;
-				s_send_buf[s_send_idx++] = (vs >  32767.0f) ?  32767 :
-                            (vs < -32768.0f) ? -32768 :
-                            (int16_t)vs;
-
-
-        if (s_send_idx >= g_packet_samples)
-        {
-            s_send_idx = 0;
-            if (m_conn_handle != BLE_CONN_HANDLE_INVALID &&
-                m_ble_max_data_len >= g_packet_samples * sizeof(int16_t))
-            {
-                uint16_t len = (uint16_t)(g_packet_samples * sizeof(int16_t));
-                uint32_t err = ble_cus_data_send(&m_cus,
-                                                 (uint8_t *)s_send_buf,
-                                                 &len,
-                                                 m_conn_handle);
-                if (err != NRF_SUCCESS &&
-                    err != NRF_ERROR_INVALID_STATE &&
-                    err != NRF_ERROR_RESOURCES &&
-                    err != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
-                {
-                    APP_ERROR_HANDLER(err);
-                }
-            }
-        }
-
-        /* -------------------------------------------------- */
-        /*  Debug log (comment out in production)              */
-        /* -------------------------------------------------- */
-        // was: NRF_LOG_INFO("raw:%d filt:%d\n", raw, (int16_t)x4);
-        NRF_LOG_INFO("raw:%d filt:%d\n", raw, (int16_t)x7);
-
-        NRF_LOG_FLUSH();
-    }
-}
-
-
-/* ================================================================== */
-/*  TWI                                                                */
-/* ================================================================== */
-void twi_handler(nrf_drv_twi_evt_t const * p_event, void * p_context)
-{
-    if (p_event->type == NRF_DRV_TWI_EVT_DONE) { m_xfer_done = true; }
-}
-
-void twi_init(void)
-{
-    const nrf_drv_twi_config_t cfg = {
-        .scl                = TWI_SCL_PIN,
-        .sda                = TWI_SDA_PIN,
-        .frequency          = NRF_DRV_TWI_FREQ_100K,
-        .interrupt_priority = APP_IRQ_PRIORITY_HIGH,
-        .clear_bus_init     = false
-    };
-    ret_code_t err = nrf_drv_twi_init(&m_twi, &cfg, twi_handler, NULL);
-    APP_ERROR_CHECK(err);
-    nrf_drv_twi_enable(&m_twi);
-}
-
-
-/* ================================================================== */
-/*  BLE stack                                                          */
-/* ================================================================== */
-void log_init(void)
-{
-    ret_code_t err = NRF_LOG_INIT(NULL);
-    APP_ERROR_CHECK(err);
-    NRF_LOG_DEFAULT_BACKENDS_INIT();
-}
-
-void timer_init(void)
-{
-    ret_code_t err = app_timer_init();
-    APP_ERROR_CHECK(err);
-}
-
-void power_management_init(void)
-{
-    ret_code_t err = nrf_pwr_mgmt_init();
-    APP_ERROR_CHECK(err);
-}
-
-void idle_state_handle(void)
-{
-    if (NRF_LOG_PROCESS() == false) { nrf_pwr_mgmt_run(); }
-}
-
-void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
-{
-    app_error_handler(DEAD_BEEF, line_num, p_file_name);
-}
 
 /* ---------- GAP ---------- */
 void gap_params_init(void)
@@ -514,10 +208,12 @@ void cus_data_handler(ble_cus_evt_t * p_evt)
 {
     if (p_evt->type == BLE_CUS_EVT_NOTIFY_ENABLE)
     {
+				m_notify_enabled = true;
         NRF_LOG_INFO("Notify ON");
     }
     else if (p_evt->type == BLE_CUS_EVT_NOTIFY_DISABLE)
     {
+				 m_notify_enabled = false;
         NRF_LOG_INFO("Notify OFF");
     }
     else if (p_evt->type == BLE_CUS_EVT_RX_DATA)
@@ -578,6 +274,7 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
 
         case BLE_GAP_EVT_DISCONNECTED:
             NRF_LOG_INFO("Disconnected");
+						m_notify_enabled = false;
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
             break;
 
@@ -664,4 +361,270 @@ void advertising_start(void)
 {
     ble_advertising_start(&m_advertising, BLE_ADV_MODE_FAST);
     NRF_LOG_INFO("Advertising started");
+}
+
+/* ---------- Thin accessors over the BLE globals above (used by main loop / device_mode) ---------- */
+uint16_t ble_app_conn_handle(void)  { return m_conn_handle; }
+bool     ble_app_is_connected(void) { return m_conn_handle != BLE_CONN_HANDLE_INVALID; }
+
+void ble_app_set_conn_interval(uint16_t min_ms, uint16_t max_ms)
+{
+    ble_gap_conn_params_t params = {
+        .min_conn_interval = MSEC_TO_UNITS(min_ms, UNIT_1_25_MS),
+        .max_conn_interval = MSEC_TO_UNITS(max_ms, UNIT_1_25_MS),
+        .slave_latency     = SLAVE_LATENCY,
+        .conn_sup_timeout  = CONN_SUP_TIMEOUT,
+    };
+    sd_ble_gap_ppcp_set(&params);
+    if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+    {
+        sd_ble_gap_conn_param_update(m_conn_handle, &params);
+    }
+}
+
+uint32_t ble_app_send(uint8_t const *data, uint16_t len)
+{
+     if (m_conn_handle == BLE_CONN_HANDLE_INVALID)
+        return NRF_ERROR_INVALID_STATE;
+
+    if (len > m_ble_max_data_len)                 { return NRF_ERROR_DATA_SIZE; }
+    uint16_t l = len;
+    return ble_cus_data_send(&m_cus, (uint8_t *)data, &l, m_conn_handle);
+}
+
+/* ---------- System helpers ---------- */
+void log_init(void)
+{
+    ret_code_t err = NRF_LOG_INIT(NULL);
+    APP_ERROR_CHECK(err);
+    NRF_LOG_DEFAULT_BACKENDS_INIT();
+}
+
+void timer_init(void)
+{
+    ret_code_t err = app_timer_init();
+    APP_ERROR_CHECK(err);
+}
+
+void power_management_init(void)
+{
+    ret_code_t err = nrf_pwr_mgmt_init();
+    APP_ERROR_CHECK(err);
+}
+
+void idle_state_handle(void)
+{
+    if (!NRF_LOG_PROCESS()) { nrf_pwr_mgmt_run(); }
+}
+
+void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
+{
+    app_error_handler(DEAD_BEEF, line_num, p_file_name);
+}
+
+/* ================================================================
+ *  Entry point
+ * ================================================================ */
+int main(void)
+{
+    log_init();
+    timer_init();
+    twi_init();
+    power_management_init();
+    ble_stack_init();
+    gap_params_init();
+    gatt_init();
+    services_init();
+    advertising_init();
+    conn_params_init();
+		
+		advertising_start();
+		
+				
+		timer2_init();
+		ecg_init();
+
+		nrf_gpio_cfg_output(3);
+		nrf_gpio_pin_set(3);
+		
+		/*
+     ── Sensor init — non-fatal if hardware absent  
+    s_ppg_present   = max30102_init();
+    nrf_drv_twi_disable(&m_twi); nrf_drv_twi_enable(&m_twi);
+    s_accel_present = MMA8452Q_init(0x1C, SCALE_2G, ODR_100);
+    nrf_drv_twi_disable(&m_twi); nrf_drv_twi_enable(&m_twi);
+    s_tmp_present   = tmp117_Init();
+
+    if (!s_ppg_present)   NRF_LOG_WARNING("[HW] MAX30102 not found");
+    if (!s_accel_present) NRF_LOG_WARNING("[HW] MMA8452Q not found");
+    if (!s_tmp_present)   NRF_LOG_WARNING("[HW] TMP117 not found");
+
+    if (s_accel_present) { mma8452q_alert_init(); }
+
+    pedometer_reset(&g_pedometer);
+    temp_filter_reset(&g_temp_filter);
+    memset(&s_dash, 0, sizeof(s_dash));
+
+		
+   
+
+     ── Main loop ─────────────────────────────────────────── */
+		 
+    while (1)
+    {
+				NRF_LOG_PROCESS();
+				
+        uint32_t now_ms = timer2_now() / 1000;
+
+        /* ── ECG sample ready (250 Hz, set by SAADC ISR) ── */
+        if (g_ecg_ready)
+        {
+            g_ecg_ready = false;
+            float filtered = ecg_process(g_ecg_raw);
+		//			NRF_LOG_INFO("raw, %d,filt: %d\n",g_ecg_raw,(int)(filtered *100.0f));
+		//			NRF_LOG_FLUSH();
+            /* Scale to 0–999 for LCD waveform */
+            int32_t ecg_disp = (int32_t)(g_ecg.filtered * 0.25f) + 500;
+            if (ecg_disp < 0)   ecg_disp = 0;
+            if (ecg_disp > 999) ecg_disp = 999;
+            s_ecg_display = (uint16_t)ecg_disp;
+
+            s_ecg_buf[s_ecg_idx++] = (int16_t)filtered;
+
+            if (s_ecg_idx >= g_cmd_pkt_samples && (ble_app_is_connected() && m_notify_enabled))
+            {
+                uint16_t total = g_cmd_pkt_samples;
+                s_ecg_idx = 0;
+                for (uint16_t off = 0; off < total; off += ECG_MAX_SAMPLES)
+                {
+                    uint16_t chunk = total - off;
+                    if (chunk > ECG_MAX_SAMPLES) chunk = ECG_MAX_SAMPLES;
+                    ret_code_t err = ble_app_send(
+                        (uint8_t *)(s_ecg_buf + off), chunk * sizeof(int16_t));
+                    if (err != NRF_SUCCESS             &&
+                        err != NRF_ERROR_INVALID_STATE  &&
+                        err != NRF_ERROR_RESOURCES      &&
+                        err != NRF_ERROR_DATA_SIZE       &&
+                        err != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+                    {
+                        APP_ERROR_HANDLER(err);
+                    }
+                }
+            }
+        }
+
+        /* ── Sensor tick (10 ms CONTINUOUS / g_period_ms PERIODIC) ── */
+				
+        if (g_sensor_tick)
+        {
+            g_sensor_tick = false;
+            now_ms = timer2_now() / 1000;
+
+            /* ── MAX30102: read FIFO, compute when buffer full ── */
+            if (s_ppg_present)
+            {
+                int n = max30102_read_samples(s_ir_buf + s_ppg_count,
+                                              s_red_buf + s_ppg_count,
+                                              PPG_BUF_SIZE - s_ppg_count);
+                s_ppg_count += n;
+
+                if (s_ppg_count >= PPG_BUF_SIZE)
+                {
+                    float hr = 0.0f, spo2 = 0.0f;
+                    if (max30102_compute(s_ir_buf, s_red_buf, s_ppg_count, &hr, &spo2))
+                    {
+                        g_sensor.hr_ppg = (uint8_t)hr;
+                        g_sensor.spo2   = (uint8_t)spo2;
+                        s_dash.hr       = hr;
+                        s_dash.spo2     = spo2;
+                        dashboard_update_hr(&s_dash);
+                    }
+                    s_ppg_count = 0;
+                }
+            }
+
+            /* ── Accelerometer → pedometer + LCD wake ── */
+            if (s_accel_present)
+            {
+                MMA8452Q_read();
+                pedometer_update(&g_pedometer, g_accel.ac, now_ms);
+
+                g_sensor.steps   = pedometer_get_steps(&g_pedometer);
+                g_sensor.cadence = pedometer_get_cadence(&g_pedometer, now_ms);
+
+                s_dash.steps        = g_sensor.steps;
+                s_dash.cadence      = g_sensor.cadence;
+                s_dash.timestamp_ms = now_ms;
+            }
+
+            dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
+            dashboard_update_ecg(&s_dash, s_ecg_display);
+
+            /* ── TMP117 one-shot state machine ── */
+            if (s_tmp_present)
+            {
+                if (!s_tmp_triggered)
+                {
+                    tmp117_wake_oneshot();
+                    s_tmp_triggered  = true;
+                    s_tmp_trigger_ms = now_ms;
+                }
+                else if ((now_ms - s_tmp_trigger_ms) >= 200)
+                {
+                    float raw_temp = tmp117_get_Temp();
+                    tmp117_shutdown_mode();
+                    s_tmp_triggered = false;
+
+                    if (raw_temp > TMP117_TEMP_INVALID + 1.0f)
+                    {
+                        float ft = temp_filter_update(&g_temp_filter, raw_temp);
+                        g_sensor.temp      = ft;
+                        g_sensor.temp_valid = true;
+
+                        s_dash.temperature = ft;
+                        s_dash.temp_valid  = true;
+                        dashboard_update_temp(&s_dash);
+                    }
+                }
+            }
+
+            if (ble_app_is_connected() && m_notify_enabled)
+            {
+                send_vitals_packet();
+            }
+
+            /* ── Status log every ~1 s (100 × 10 ms ticks) ── */
+            static uint32_t s_log_tick = 0;
+            if (++s_log_tick >= 100)
+            {
+                s_log_tick = 0;
+                NRF_LOG_INFO("--- [STATUS] t=%u ms ---", now_ms);
+                NRF_LOG_INFO("  BLE : %s",
+                             ble_app_is_connected() ? "connected" : "advertising");
+                NRF_LOG_INFO("  ECG : buf=%u/%u  hr=%u bpm",
+                             s_ecg_idx, g_cmd_pkt_samples, g_sensor.hr_ecg);
+                NRF_LOG_INFO("  PPG : hr=%u bpm  spo2=%u%%  buf=%u/%u",
+                             g_sensor.hr_ppg, g_sensor.spo2,
+                             s_ppg_count, PPG_BUF_SIZE);
+                if (g_sensor.temp_valid)
+                {
+                    NRF_LOG_INFO("  TMP : " NRF_LOG_FLOAT_MARKER " C",
+                                 NRF_LOG_FLOAT(g_sensor.temp));
+                }
+                else
+                {
+                    NRF_LOG_INFO("  TMP : no reading");
+                }
+                NRF_LOG_INFO("  HW  : ppg=%d accel=%d tmp=%d",
+                             s_ppg_present, s_accel_present, s_tmp_present);
+            }
+        }
+				
+        /* ── Idle ── */
+        if (!g_ecg_ready && !g_sensor_tick)
+        {
+						
+            idle_state_handle();
+        }
+    }
 }

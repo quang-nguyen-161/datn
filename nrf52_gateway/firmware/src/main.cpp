@@ -7,7 +7,7 @@
 // UART protocol (RX=16, TX=17, 115200 baud):
 //   [0xAA][0x55][TYPE][NAME_LEN][NAME...][LEN_LO][LEN_HI][DATA...][XOR_CHK]
 //   TYPE 0x01 = ECG:    50 × int16_t LE (100 bytes)
-//   TYPE 0x02 = Vitals: ecgHr, ppgHr, spo2, temp (4 × float LE = 16 bytes)
+//   TYPE 0x02 = Vitals: [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10] = 5 bytes
 //
 // First boot — captive portal (AP "HealthMonitor-Setup"):
 //   Enter WiFi SSID/pass + ThingsBoard admin credentials.
@@ -37,10 +37,14 @@
 
 // ── Compile-time constants ────────────────────────────────────────────────────
 
-const char* TB_HOST = "103.116.39.179";
+// Primary: old c7-2slab server. Fallback: local ThingsBoard (Docker) on the LAN —
+// each broker has its own gateway device/token, so both must be set.
+const char* TB_HOST_PRIMARY  = "103.116.39.179";
+const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB server's LAN IP
+#define TB_GATEWAY_TOKEN_PRIMARY  "4o51ajerynq34mtosc26"
+#define TB_GATEWAY_TOKEN_FALLBACK "gFrMeC66odU1ZVlNP60X"
 
 #define TB_MQTT_PORT          1883
-#define TB_GATEWAY_TOKEN      "4o51ajerynq34mtosc26"
 #define MQTT_BUF_SIZE         2048
 
 #define BATCH_SIZE            100     // max int16_t samples per ECG packet (100×2=200 B fits BLE ATT ~238 B)
@@ -53,7 +57,7 @@ const char* TB_HOST = "103.116.39.179";
 // Packet: [0xAA][0x55][TYPE][NAME_LEN][NAME...][LEN_LO][LEN_HI][DATA...][XOR_CHK]
 // XOR_CHK = XOR of all bytes from TYPE through the last DATA byte
 // TYPE 0x01 = ECG:    DATA = N × int16_t LE, N = 1..BATCH_SIZE (default 50, max 100)
-// TYPE 0x02 = Vitals: DATA = ecgHr, ppgHr, spo2, temp (4 × float LE = 16 bytes)
+// TYPE 0x02 = Vitals: DATA = [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10] = 5 bytes
 
 #define UART_RX_PIN    16
 #define UART_TX_PIN    17
@@ -711,11 +715,31 @@ static void setupWiFi() {
 
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 
+static const char* g_tbHost  = TB_HOST_PRIMARY;
+static const char* g_tbToken = TB_GATEWAY_TOKEN_PRIMARY;
+
+// Probe the primary (old c7-2slab) broker; fall back to local TB if unreachable.
+// Call once after WiFi is up, before mqttClient.setServer().
+static void selectBroker() {
+  WiFiClient probe;
+  if (probe.connect(TB_HOST_PRIMARY, TB_MQTT_PORT, 2000)) {
+    probe.stop();
+    g_tbHost  = TB_HOST_PRIMARY;
+    g_tbToken = TB_GATEWAY_TOKEN_PRIMARY;
+    Serial.printf("[MQTT] Using primary broker %s:%d\n", g_tbHost, TB_MQTT_PORT);
+  } else {
+    g_tbHost  = TB_HOST_FALLBACK;
+    g_tbToken = TB_GATEWAY_TOKEN_FALLBACK;
+    Serial.printf("[MQTT] Primary broker %s:%d unreachable — falling back to %s:%d\n",
+                  TB_HOST_PRIMARY, TB_MQTT_PORT, g_tbHost, TB_MQTT_PORT);
+  }
+}
+
 static bool mqttConnect() {
   if (mqttClient.connected()) return true;
   char clientId[32];
   snprintf(clientId, sizeof(clientId), "esp32_%08X", (uint32_t)ESP.getEfuseMac());
-  bool ok = mqttClient.connect(clientId, TB_GATEWAY_TOKEN, NULL);
+  bool ok = mqttClient.connect(clientId, g_tbToken, NULL);
   if (ok) Serial.println("[MQTT] Connected");
   else    Serial.printf("[MQTT] Failed rc=%d — retry in 5s\n", mqttClient.state());
   return ok;
@@ -751,13 +775,12 @@ static void handlePacket() {
     nodeBatchSize[idx]  = n;
     nodeBatchTs[idx]    = epochMs();
     nodeBatchReady[idx] = true;
-  } else if (pktType == PKT_TYPE_VIT && pktDataLen == 16) {
-    float vals[4];
-    memcpy(vals, pktData, 16);
-    nodeHr[idx]         = vals[0];
-    nodePpgHr[idx]      = vals[1];
-    nodeSpo2[idx]       = vals[2];
-    nodeTemp[idx]       = vals[3];
+  } else if (pktType == PKT_TYPE_VIT && pktDataLen == 5) {
+    // [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
+    nodeHr[idx]         = pktData[0];
+    nodePpgHr[idx]      = pktData[1];
+    nodeSpo2[idx]       = pktData[2];
+    nodeTemp[idx]       = (float)(pktData[3] | ((uint16_t)pktData[4] << 8)) / 10.0f;
     nodeVitalReady[idx] = true;
   } else {
     Serial.printf("[UART] Unknown pkt type=0x%02X len=%u\n", pktType, pktDataLen);
@@ -841,11 +864,11 @@ static void publishVitalPacket(int idx, const String& name) {
   if (ts > 0)
     pos += snprintf(payload + pos, PAYLOAD_BUF_SIZE - pos, "\"ts\":%llu,", ts);
   pos += snprintf(payload + pos, PAYLOAD_BUF_SIZE - pos,
-    "\"values\":{\"ecgHeartRate\":%.1f,\"ppgHeartRate\":%.1f,"
-    "\"spo2\":%.1f,\"temperature\":%.1f}}]}",
+    "\"values\":{\"ecgHeartRate\":%.0f,\"ppgHeartRate\":%.0f,"
+    "\"spo2\":%.0f,\"temperature\":%.1f}}]}",
     nodeHr[idx], nodePpgHr[idx], nodeSpo2[idx], nodeTemp[idx]);
   bool ok = mqttClient.publish("v1/gateway/telemetry", (uint8_t*)payload, pos);
-  Serial.printf("[%s] vitals ECG-HR:%.1f PPG-HR:%.1f SpO2:%.1f %s\n",
+  Serial.printf("[%s] vitals ECG-HR:%.0f PPG-HR:%.0f SpO2:%.0f %s\n",
     name.c_str(), nodeHr[idx], nodePpgHr[idx], nodeSpo2[idx], ok ? "OK" : "FAIL");
 }
 
@@ -865,7 +888,8 @@ void setup() {
   setupWiFi();
   loadNodesFromNVS();
 
-  mqttClient.setServer(TB_HOST, TB_MQTT_PORT);
+  selectBroker();
+  mqttClient.setServer(g_tbHost, TB_MQTT_PORT);
   mqttClient.setBufferSize(MQTT_BUF_SIZE);
 
   nodeMutex  = xSemaphoreCreateMutex();

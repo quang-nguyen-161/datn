@@ -38,8 +38,8 @@ Both gateways implement the same data contract:
 
 | Behaviour | Gateway A | Gateway B |
 |---|---|---|
-| ECG dispatch | `len % 2 == 0 && len != 16` | nRF central: `hvx->len % 2 == 0 && hvx->len != 16` |
-| Vitals dispatch | `len == 16` | nRF central: `hvx->len == 16` |
+| ECG dispatch | `len % 2 == 0 && len >= 2` | nRF central: `hvx->len % 2 == 0 && hvx->len >= 2` |
+| Vitals dispatch | `len == 5` | nRF central: `hvx->len == 5` |
 | Sample count | N = len / 2, default 50, max 100 | N = UART DATA len / 2, default 50, max 100 |
 | MQTT chunk rule | ≤ 100 samples → 1 msg; > 100 → split, ts +1 ms/chunk | identical |
 | Config delivery | BLE write direct to RX char | UART TYPE 0x03–0x06 → nRF central → BLE write |
@@ -88,9 +88,10 @@ preserves ordering.
 
 ### `gateway.py`
 ```python
-# on_notify — size-agnostic dispatch (vitals check must come first since 16 is also even)
-if len(data) == VITALS_SIZE:          # 16 bytes: 4 × float32 LE
-    ecg_hr, ppg_hr, spo2, temp = struct.unpack_from('<4f', data)
+# on_notify — size-agnostic dispatch (vitals is 5 bytes, always odd, never collides with ECG)
+if len(data) == VITALS_SIZE:          # 5 bytes: [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
+    ecg_hr, ppg_hr, spo2, temp_x10 = struct.unpack_from('<3BH', data)
+    temp = temp_x10 / 10.0
     publish_q.put_nowait(('vitals', node.name, (ecg_hr, ppg_hr, spo2, temp)))
 elif len(data) >= 2 and len(data) % 2 == 0:   # N × int16 LE ECG
     n = len(data) // 2
@@ -128,7 +129,20 @@ for (int ci = 0; ci < nChunks; ci++) {
 
 ## 4. Vitals payload
 
-Published by both gateways. `gateway.py` receives vitals directly via BLE notify (16-byte packet); `main.cpp` receives them via UART TYPE 0x02 from the nRF central.
+Published by both gateways. `gateway.py` receives vitals directly via BLE notify (5-byte packet); `main.cpp` receives them via UART TYPE 0x02 from the nRF central.
+
+**BLE/UART wire format — 5 bytes:**
+
+```
+[hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
+```
+
+| Byte(s) | Field | Notes |
+|---|---|---|
+| 0 | `hrEcg` | uint8, bpm |
+| 1 | `hrPpg` | uint8, bpm |
+| 2 | `spo2` | uint8, % |
+| 3–4 | `temp` | uint16 LE, °C × 10 (e.g. 368 = 36.8°C) |
 
 ```json
 {
@@ -136,9 +150,9 @@ Published by both gateways. `gateway.py` receives vitals directly via BLE notify
     {
       "ts": 1700000000000,
       "values": {
-        "ecgHeartRate":  87.8,
-        "ppgHeartRate":  86.6,
-        "spo2":          98.2,
+        "ecgHeartRate":  88,
+        "ppgHeartRate":  87,
+        "spo2":          98,
         "temperature":   36.8
       }
     }
@@ -148,30 +162,30 @@ Published by both gateways. `gateway.py` receives vitals directly via BLE notify
 
 | Key | Unit | Type | Notes |
 |---|---|---|---|
-| `ecgHeartRate` | bpm | float, 1 decimal | — |
-| `ppgHeartRate` | bpm | float, 1 decimal | — |
-| `spo2` | % | float, 1 decimal | — |
-| `temperature` | °C | float, 1 decimal | — |
+| `ecgHeartRate` | bpm | integer | — |
+| `ppgHeartRate` | bpm | integer | — |
+| `spo2` | % | integer | — |
+| `temperature` | °C | float, 1 decimal | decoded from uint16 × 10 |
 
 ```python
 # gateway.py — publish_worker vitals branch
-# BLE notify: 4 × float32 LE = 16 bytes: [ecgHr][ppgHr][spo2][temp]
+# BLE notify: 5 bytes: [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
 _, node_name, (ecg_hr, ppg_hr, spo2, temp) = item   # item[0] == 'vitals'
 payload = { node_name: [{ 'ts': int(time.time()*1000),
-                           'values': { 'ecgHeartRate': round(ecg_hr, 1),
-                                       'ppgHeartRate': round(ppg_hr, 1),
-                                       'spo2':         round(spo2,   1),
-                                       'temperature':  round(temp,   1) } }] }
+                           'values': { 'ecgHeartRate': ecg_hr,
+                                       'ppgHeartRate': ppg_hr,
+                                       'spo2':         spo2,
+                                       'temperature':  round(temp, 1) } }] }
 mqtt.publish('v1/gateway/telemetry', json.dumps(payload))
 ```
 
 ```cpp
 // main.cpp — publishVitalPacket()
-// UART RX: 4 × float32 LE = 16 bytes: [ecgHr][ppgHr][spo2][temp]
+// UART RX: 5 bytes: [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
 snprintf(payload, ...,
   "{\"%s\":[{\"ts\":%llu,\"values\":{"
-  "\"ecgHeartRate\":%.1f,\"ppgHeartRate\":%.1f,"
-  "\"spo2\":%.1f,\"temperature\":%.1f}}]}",
+  "\"ecgHeartRate\":%.0f,\"ppgHeartRate\":%.0f,"
+  "\"spo2\":%.0f,\"temperature\":%.1f}}]}",
   name, ts, nodeHr[i], nodePpgHr[i], nodeSpo2[i], nodeTemp[i]);
 mqttClient.publish("v1/gateway/telemetry", payload, len);
 ```
@@ -328,7 +342,7 @@ Written directly to the RX characteristic (`6e401402-b5a3-f393-e0a9-e50e24dcca9e
 | TYPE | Direction | DATA | Description |
 |---|---|---|---|
 | `0x01` | nRF→ESP32 | 2N bytes: N × `int16_t` LE (N = freq × interval / 1000, default 50, max 100) | ECG batch — size varies with config |
-| `0x02` | nRF→ESP32 | 16 bytes: 4 × `float` LE (ecgHr, ppgHr, spo2, temp) | Vitals |
+| `0x02` | nRF→ESP32 | 5 bytes: `[hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]` | Vitals |
 | `0x03` | ESP32→nRF | 5 bytes: `CMD_ECG_CFG` frame | ECG config → forwarded to BLE RX char |
 | `0x04` | ESP32→nRF | 31 bytes: `CMD_THR` frame | Thresholds → forwarded to BLE RX char |
 | `0x05` | ESP32→nRF | 5 bytes: `CMD_PPG_CFG` frame | PPG config → forwarded to BLE RX char |

@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <string.h>
+#include "nrf_delay.h"
+#include "GC9A01.h"
 
 #include "boards.h"
 #include "app_error.h"
@@ -116,10 +118,17 @@ static uint16_t s_ecg_idx = 0;
 
 static void send_vitals_packet(void)
 {
-    /* 4×float32 LE = 16 bytes: [ecgHr][ppgHr][spo2][temp]
-     * Dispatched by gateway on len==16; published as ecgHeartRate/ppgHeartRate/spo2/temperature */
-    float pkt[4] = { g_sensor.hr_ecg, g_sensor.hr_ppg, g_sensor.spo2, g_sensor.temp };
-    ble_app_send((uint8_t *)pkt, sizeof(pkt));
+    /* 5 bytes: [hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]
+     * Dispatched by gateway on len==5; published as ecgHeartRate/ppgHeartRate/spo2/temperature */
+    uint16_t temp_x10 = (uint16_t)(g_sensor.temp * 10.0f + 0.5f);
+    uint8_t pkt[5] = {
+        g_sensor.hr_ecg,
+        g_sensor.hr_ppg,
+        g_sensor.spo2,
+        (uint8_t)(temp_x10 & 0xFF),
+        (uint8_t)(temp_x10 >> 8),
+    };
+    ble_app_send(pkt, sizeof(pkt));
 }
 
 /* ================================================================
@@ -131,15 +140,12 @@ static dashboard_data_t s_dash;
 static uint16_t         s_ecg_display = 500;  /* ECG mapped to 0–999 for LCD */
 
 /* Sensor presence — set at init, guards all tick reads */
+static bool s_lcd_present   = false;
 static bool s_ppg_present   = false;
 static bool s_accel_present = false;
 static bool s_tmp_present   = false;
 
-/* MAX30102 sample accumulation — filled at 100 Hz (1 sample / 10 ms tick) */
-#define PPG_BUF_SIZE 100
-static uint32_t s_ir_buf[PPG_BUF_SIZE];
-static uint32_t s_red_buf[PPG_BUF_SIZE];
-static int      s_ppg_count = 0;
+/* MAX30102 HR/SpO2 is computed incrementally inside max30102_process(). */
 
 /* TMP117 one-shot state machine */
 static bool     s_tmp_triggered  = false;
@@ -154,8 +160,8 @@ static uint32_t s_tmp_trigger_ms = 0;
 #define APP_BLE_OBSERVER_PRIO       3
 #define APP_ADV_INTERVAL            64          /* 40 ms */
 #define APP_ADV_DURATION            18000       /* 180 s  */
-#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(20,  UNIT_1_25_MS)
-#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(75,  UNIT_1_25_MS)
+#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(8,  UNIT_1_25_MS)
+#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(8,  UNIT_1_25_MS)
 #define SLAVE_LATENCY               0
 #define CONN_SUP_TIMEOUT            MSEC_TO_UNITS(4000, UNIT_10_MS)
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)
@@ -196,6 +202,18 @@ void gap_params_init(void)
     p.slave_latency     = SLAVE_LATENCY;
     p.conn_sup_timeout  = CONN_SUP_TIMEOUT;
     sd_ble_gap_ppcp_set(&p);
+}
+
+static max30102_sr_t ppg_hz_to_sr(uint16_t hz)
+{
+    if (hz <= 50)   return max30102_sr_50;
+    if (hz <= 100)  return max30102_sr_100;
+    if (hz <= 200)  return max30102_sr_200;
+    if (hz <= 400)  return max30102_sr_400;
+    if (hz <= 800)  return max30102_sr_800;
+    if (hz <= 1000) return max30102_sr_1000;
+    if (hz <= 1600) return max30102_sr_1600;
+    return max30102_sr_3200;
 }
 
 /* ---------- QWR error ---------- */
@@ -444,7 +462,7 @@ int main(void)
 		nrf_gpio_cfg_output(3);
 		nrf_gpio_pin_set(3);
 #if !SENSOR_TEST_MODE
-		advertising_start();
+		
 #endif
 		
     
@@ -458,6 +476,15 @@ int main(void)
     s_tmp_present   = tmp117_Init();
 #endif
 
+    s_lcd_present = lcd_spi_init();
+    if (s_lcd_present) {
+        GC9A01_init();
+        dashboard_splash();
+        nrf_delay_ms(2000);
+        dashboard_init_layout();
+    }
+
+    if (!s_lcd_present)   NRF_LOG_WARNING("[HW] GC9A01 LCD not found");
     if (!s_ppg_present)   NRF_LOG_WARNING("[HW] MAX30102 not found");
     if (!s_accel_present) NRF_LOG_WARNING("[HW] MMA8452Q not found");
     if (!s_tmp_present)   NRF_LOG_WARNING("[HW] TMP117 not found");
@@ -469,24 +496,12 @@ int main(void)
     memset(&s_dash, 0, sizeof(s_dash));
 
     device_mode_init();   /* starts m_sensor_timer → drives g_sensor_tick */
+		advertising_start();
 		
-		
-   static iir1_df2t_t s_ir_hp;    /* HP 0.5 Hz — baseline wander removal  */
-static iir1_df2t_t s_ir_lp;    /* LP 5.0 Hz — high-freq noise removal  */
-static nlms_t      s_ir_nlms;  /* NLMS adaptive filter (32 taps)        */
-static delay_t     s_ir_dly;   /* ALE decorrelation delay               */
-static sg_filter_t s_ir_sg;    /* Savitzky-Golay smoothing (window=11)  */
-		
-butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
-    butter1_lp_coeffs(100.0f, 5.0f, &s_ir_lp);
-    nlms_init(&s_ir_nlms, 0.005f, 1e-6f);
-    delay_init(&s_ir_dly);
-    sg_init(&s_ir_sg);
- 
+    /* PPG DSP filters live inside drivers/ppg/max.c (max30102_process). */
+
     while (1)
     {
-				NRF_LOG_PROCESS();
-				
         uint32_t now_ms = timer2_now() / 1000;
 			
        
@@ -497,45 +512,41 @@ butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
 				
             g_sensor_tick = false;
             now_ms = timer2_now() / 1000;
-				
-            /* ── MAX30102: read FIFO, compute when buffer full ── */
-					/*
+
+            /* ── Apply pending gateway config commands ── */
+            if (g_cmd_cfg_pending)
+            {
+                g_cmd_cfg_pending = false;
+                ecg_set_sample_us(g_cmd_sample_us);
+            }
+            if (g_ppg_cfg_pending && s_ppg_present)
+            {
+                g_ppg_cfg_pending = false;
+                max30102_set_sampling_rate(ppg_hz_to_sr(g_ppg_sample_freq));
+                max30102_set_led_current_1((float)g_ppg_red_ma);
+                max30102_set_led_current_2((float)g_ppg_ir_ma);
+                max30102_reset_filters();
+            }
+            if (g_vital_cfg_pending)
+            {
+                g_vital_cfg_pending = false;
+            }
+
+            /* MAX30102: read one sample, process incrementally */
             if (ENABLE_MAX)
             {
-                int n = max30102_read_samples(s_ir_buf + s_ppg_count,
-                                              s_red_buf + s_ppg_count,
-                                              PPG_BUF_SIZE - s_ppg_count);
-								
-                s_ppg_count += n;
-								NRF_LOG_INFO("s_ppg_count %d\n",s_ppg_count);
-								NRF_LOG_FLUSH();
-                if (s_ppg_count >= PPG_BUF_SIZE)
+                uint32_t ir, red;
+                float    hr = 0.0f, spo2 = 0.0f;
+                if (max30102_read_1_sample(&ir, &red) &&
+                    max30102_process(ir, red, &hr, &spo2))
                 {
-                    float hr = 0.0f, spo2 = 0.0f;
-                    if (max30102_compute(s_ir_buf, s_red_buf, s_ppg_count, &hr, &spo2))
-                    {
-                        g_sensor.hr_ppg = (uint8_t)hr;
-                        g_sensor.spo2   = (uint8_t)spo2;
-                        s_dash.hr       = hr;
-                        s_dash.spo2     = spo2;
-                        dashboard_update_hr(&s_dash);
-											
-                    }
-                    s_ppg_count = 0;
+                    g_sensor.hr_ppg = (uint8_t)hr;
+                    g_sensor.spo2   = (uint8_t)spo2;
+                    s_dash.hr       = hr;
+                    s_dash.spo2     = spo2;
+                    if (s_lcd_present) dashboard_update_hr(&s_dash);
                 }
-					
             }
-						*/
-						uint32_t ir;
-						uint32_t red;
-						max30102_read_1_sample(&ir,&red);
-						float ir1  = iir1_step(&s_ir_hp,  ir);
-						float ir2  = iir1_step(&s_ir_lp,  ir1);
-						float ir3  = ale_process(&s_ir_nlms, &s_ir_dly, ir2);
-						float ir4  = sg_step(&s_ir_sg, ir3);
-						
-						NRF_LOG_INFO("ir: %d, fil: %d\n", ir, (int16_t) (ir4*10.0f));
-						NRF_LOG_FLUSH();
             /* ── Accelerometer → pedometer + LCD wake ── */
             if (s_accel_present)
             {
@@ -550,8 +561,10 @@ butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
                 s_dash.timestamp_ms = now_ms;
             }
 							
-           // dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
-           // dashboard_update_ecg(&s_dash, s_ecg_display);
+            if (s_lcd_present) {
+                dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
+                dashboard_update_ecg(&s_dash, s_ecg_display);
+            }
 					
             /* ── TMP117 one-shot state machine ── */
 							
@@ -573,25 +586,34 @@ butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
                     if (raw_temp > TMP117_TEMP_INVALID + 1.0f)
                     {
                         float ft = temp_filter_update(&g_temp_filter, raw_temp);
-                        g_sensor.temp      = ft;
+                        g_sensor.temp       = ft;
                         g_sensor.temp_valid = true;
 
                         s_dash.temperature = ft;
                         s_dash.temp_valid  = true;
-                        dashboard_update_temp(&s_dash);
+                        if (s_lcd_present) dashboard_update_temp(&s_dash);
                     }
                 }
             }
 			
 #if !SENSOR_TEST_MODE
-            if (ble_app_ready_to_send())
-            {
-                send_vitals_packet();
-            }
+						static uint32_t s_ble_tick = 0;
+
+						if (++s_ble_tick >= (uint32_t)(g_vital_interval_ms / 10U))
+						{
+							s_ble_tick = 0;
+
+							if (ble_app_ready_to_send())
+							{
+							send_vitals_packet();
+							}
+}
 #endif
 
             /* ── Status log every ~1 s (100 × 10 ms ticks) ── */
             static uint32_t s_log_tick = 0;
+						
+						
             if (++s_log_tick >= 100)
             {
                 s_log_tick = 0;
@@ -602,9 +624,8 @@ butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
 #endif
                 NRF_LOG_INFO("  ECG : buf=%u/%u  hr=%u bpm",
                              s_ecg_idx, g_cmd_pkt_samples, g_sensor.hr_ecg);
-                NRF_LOG_INFO("  PPG : hr=%u bpm  spo2=%u%%  buf=%u/%u",
-                             g_sensor.hr_ppg, g_sensor.spo2,
-                             s_ppg_count, PPG_BUF_SIZE);
+                NRF_LOG_INFO("  PPG : hr=%u bpm  spo2=%u%%",
+                             g_sensor.hr_ppg, g_sensor.spo2);
                 if (g_sensor.temp_valid)
                 {
                     NRF_LOG_INFO("  TMP : " NRF_LOG_FLOAT_MARKER " C",
@@ -646,7 +667,6 @@ butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
                     if (chunk > ECG_MAX_SAMPLES) chunk = ECG_MAX_SAMPLES;
                     ret_code_t err = ble_app_send(
                         (uint8_t *)(s_ecg_buf + off), chunk * sizeof(int16_t));
-                    NRF_LOG_INFO("ble_app_send err=0x%08x (chunk=%u)", err, chunk);
                     if (err != NRF_SUCCESS              &&
                         err != NRF_ERROR_INVALID_STATE  &&
                         err != NRF_ERROR_RESOURCES      &&

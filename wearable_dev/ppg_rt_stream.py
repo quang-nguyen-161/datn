@@ -1,276 +1,181 @@
+#!/usr/bin/env python3
+"""
+ppg_rt_stream.py  —  Real-time PPG waveform viewer via J-Link RTT TCP
+
+Setup:
+  1. Flash firmware and connect J-Link.
+  2. Open J-Link RTT Viewer → RTT Control Block found → leaves TCP server on 127.0.0.1:19021.
+  3. python ppg_rt_stream.py [--host 127.0.0.1] [--port 19021] [--save ppg_log.csv]
+
+Firmware logs one line per sample (100 Hz):
+  NRF_LOG_INFO("ppg:%d %d", (int)ir_filtered, peak_accepted);
+
+RTT Viewer wraps it as:  <info> app: ppg:1234 0
+The parser searches for "ppg:" anywhere in each line so the prefix is ignored.
+"""
+
 import socket
-import re
+import threading
 import csv
-import matplotlib.pyplot as plt
+import argparse
+import time
 from collections import deque
 
-# ============================================================
-# CONFIG
-# ============================================================
-HOST = "127.0.0.1"
-PORT = 19021
+import matplotlib
+matplotlib.use("TkAgg")           # swap to "Qt5Agg" if Tk is not installed
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
-MAX_SAMPLES = 1000
-CSV_FILE = "ppg_log.csv"
+# ── constants ────────────────────────────────────────────────────────────────
+FS         = 100           # firmware sample rate (Hz)
+WINDOW_SEC = 8             # rolling display window length
+WINDOW_N   = FS * WINDOW_SEC
 
-# ============================================================
-# REGEX
-#
-# Matches:
-# 00> <info> app: ir: 112442, fil: 631
-# ============================================================
-pattern = re.compile(
-    r"ir:\s*(\d+)\s*,\s*fil:\s*(-?\d+)",
-    re.IGNORECASE
-)
 
-# ============================================================
-# BUFFERS
-# ============================================================
-ir_buf = deque(maxlen=MAX_SAMPLES)
-fil_buf = deque(maxlen=MAX_SAMPLES)
+# ── reader thread ─────────────────────────────────────────────────────────────
+class PPGReader:
+    def __init__(self, host: str, port: int, csv_path: str):
+        self.sig   = deque([0.0]   * WINDOW_N, maxlen=WINDOW_N)
+        self.peaks = deque([False] * WINDOW_N, maxlen=WINDOW_N)
+        self.ts    = deque([i / FS for i in range(WINDOW_N)], maxlen=WINDOW_N)
+        self.n     = 0
+        self.lock  = threading.Lock()
+        self._run  = threading.Event()
+        self._run.set()
+        self._csv  = None
 
-# ============================================================
-# CSV SETUP
-# ============================================================
-csv_file = open(CSV_FILE, mode="w", newline="")
+        if csv_path:
+            self._csv = open(csv_path, "w", newline="", buffering=1)
+            self._cw  = csv.writer(self._csv)
+            self._cw.writerow(["n", "t_s", "ir_filt", "peak"])
 
-csv_writer = csv.writer(csv_file)
+        threading.Thread(target=self._loop, args=(host, port), daemon=True).start()
 
-csv_writer.writerow([
-    "sample",
-    "ir_raw",
-    "filtered"
-])
+    def _loop(self, host: str, port: int):
+        while self._run.is_set():
+            try:
+                sock = socket.create_connection((host, port), timeout=5)
+                print(f"[ppg_rt] connected  {host}:{port}")
+                sock.settimeout(0.5)
+                buf = ""
+                while self._run.is_set():
+                    try:
+                        buf += sock.recv(4096).decode("ascii", errors="ignore")
+                    except socket.timeout:
+                        continue
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        self._parse(line)
+            except Exception as exc:
+                print(f"[ppg_rt] {exc}  —  retrying in 2 s")
+                time.sleep(2)
 
-sample_idx = 0
-
-# ============================================================
-# RTT SOCKET
-#
-# Start:
-# JLinkRTTLogger.exe
-# or
-# JLinkRTTClient.exe
-#
-# Default RTT TCP port = 19021
-# ============================================================
-sock = socket.socket(
-    socket.AF_INET,
-    socket.SOCK_STREAM
-)
-
-print(f"Connecting to RTT @ {HOST}:{PORT} ...")
-
-sock.connect((HOST, PORT))
-
-sock.setblocking(False)
-
-print("Connected.")
-
-buffer = ""
-
-# ============================================================
-# PLOT SETUP
-# ============================================================
-plt.ion()
-
-fig, axes = plt.subplots(
-    3,
-    1,
-    figsize=(12, 8),
-    sharex=True
-)
-
-fig.suptitle(
-    "MAX30102 Real-Time Monitor",
-    fontsize=14,
-    fontweight="bold"
-)
-
-# ------------------------------------------------------------
-# RAW IR
-# ------------------------------------------------------------
-line_ir, = axes[0].plot(
-    [],
-    [],
-    linewidth=0.8,
-    label="Raw IR"
-)
-
-axes[0].set_title("Raw IR Signal")
-
-axes[0].set_ylabel("Counts")
-
-axes[0].grid(True, alpha=0.3)
-
-axes[0].legend(loc="upper left")
-
-# ------------------------------------------------------------
-# FILTERED
-# ------------------------------------------------------------
-line_fil, = axes[1].plot(
-    [],
-    [],
-    linewidth=0.8,
-    label="Filtered"
-)
-
-axes[1].set_title("Filtered Signal")
-
-axes[1].set_ylabel("Amplitude")
-
-axes[1].grid(True, alpha=0.3)
-
-axes[1].legend(loc="upper left")
-
-# ------------------------------------------------------------
-# ZOOMED FILTERED
-# ------------------------------------------------------------
-line_zoom, = axes[2].plot(
-    [],
-    [],
-    linewidth=1.2,
-    label="PPG Waveform"
-)
-
-axes[2].set_title("Zoomed Pulse Waveform")
-
-axes[2].set_ylabel("Amplitude")
-
-axes[2].set_xlabel("Samples")
-
-axes[2].grid(True, alpha=0.3)
-
-axes[2].legend(loc="upper left")
-
-plt.tight_layout()
-
-# ============================================================
-# MAIN LOOP
-# ============================================================
-try:
-
-    while True:
-
-        # ----------------------------------------------------
-        # RECEIVE RTT DATA
-        # ----------------------------------------------------
+    def _parse(self, line: str):
+        idx = line.find("ppg:")
+        if idx < 0:
+            return
+        parts = line[idx + 4:].split()
+        if not parts:
+            return
         try:
+            val  = float(parts[0])
+            peak = len(parts) > 1 and parts[1].strip() == "1"
+        except ValueError:
+            return
+        with self.lock:
+            self.n += 1
+            t = self.n / FS
+            self.sig.append(val)
+            self.peaks.append(peak)
+            self.ts.append(t)
+        if self._csv:
+            self._cw.writerow([self.n, f"{t:.3f}", f"{val:.1f}", int(peak)])
 
-            chunk = sock.recv(4096).decode(
-                errors="ignore"
-            )
+    def snapshot(self):
+        with self.lock:
+            return list(self.ts), list(self.sig), list(self.peaks)
 
-            if chunk:
-                buffer += chunk
+    def close(self):
+        self._run.clear()
+        if self._csv:
+            self._csv.close()
 
-        except BlockingIOError:
-            pass
 
-        except Exception:
-            pass
+# ── plot ──────────────────────────────────────────────────────────────────────
+BG   = "#111111"
+GRID = "#2a2a2a"
+SIG  = "#00ccff"
+PKC  = "#ff3333"
+TXT  = "#dddddd"
 
-        # ----------------------------------------------------
-        # SPLIT COMPLETE LINES
-        # ----------------------------------------------------
-        lines = buffer.split("\n")
 
-        buffer = lines[-1]
+def main():
+    ap = argparse.ArgumentParser(description="Real-time PPG viewer (J-Link RTT)")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=19021)
+    ap.add_argument("--save", default="ppg_log.csv",
+                    help="CSV output path  (pass empty string to disable)")
+    args   = ap.parse_args()
+    reader = PPGReader(args.host, args.port, args.save or None)
 
-        # ----------------------------------------------------
-        # PARSE LINES
-        # ----------------------------------------------------
-        for line in lines[:-1]:
+    fig, ax = plt.subplots(figsize=(14, 4))
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+    ax.grid(color=GRID, lw=0.5)
+    for sp in ax.spines.values():
+        sp.set_color("#333")
+    ax.tick_params(colors=TXT, labelsize=9)
+    ax.set_xlabel("Time (s)", color=TXT, fontsize=9)
+    ax.set_ylabel("Filtered IR (counts)", color=TXT, fontsize=9)
+    ax.set_title("PPG  —  HP 0.5 Hz → LP 5 Hz → ALE-NLMS → SG  (RTT live)",
+                 color="white", fontsize=10, pad=6)
 
-            m = pattern.search(line)
+    line,   = ax.plot([], [], color=SIG, lw=0.9, label="IR filtered")
+    scatter = ax.scatter([], [], color=PKC, s=40, zorder=5, label="Accepted peak")
+    info    = ax.text(0.01, 0.96, "waiting for data…",
+                      transform=ax.transAxes, color="white",
+                      fontsize=10, va="top", family="monospace")
+    ax.legend(loc="upper right", facecolor="#222", labelcolor=TXT,
+              fontsize=8, framealpha=0.7)
 
-            if not m:
-                continue
+    def update(_):
+        ts, sig, pks = reader.snapshot()
 
-            ir_val = int(m.group(1))
-            fil_val = int(m.group(2))
+        if max(abs(v) for v in sig) < 0.5:
+            return line, scatter, info
 
-            ir_buf.append(ir_val)
-            fil_buf.append(fil_val)
+        line.set_data(ts, sig)
+        ax.set_xlim(ts[0], ts[-1] + 0.01)
+        lo, hi = min(sig), max(sig)
+        mg = max((hi - lo) * 0.12, 1.0)
+        ax.set_ylim(lo - mg, hi + mg)
 
-            csv_writer.writerow([
-                sample_idx,
-                ir_val,
-                fil_val
-            ])
+        # peak markers
+        px = [t for t, p in zip(ts, pks) if p]
+        py = [v for v, p in zip(sig, pks) if p]
+        scatter.set_offsets(list(zip(px, py)) if px else [(0, lo - mg * 2)])
 
-            sample_idx += 1
+        # live HR from peak spacing
+        hr_str = ""
+        if len(px) >= 2:
+            gaps = [px[i+1] - px[i] for i in range(len(px) - 1)
+                    if 0.30 < px[i+1] - px[i] < 2.0]
+            if gaps:
+                hr = 60.0 / (sum(gaps) / len(gaps))
+                hr_str = f"   HR ≈ {hr:.0f} bpm"
 
-        csv_file.flush()
+        info.set_text(f"t = {ts[-1]:.1f} s{hr_str}")
+        return line, scatter, info
 
-        # ----------------------------------------------------
-        # UPDATE PLOTS
-        # ----------------------------------------------------
-        n = len(ir_buf)
+    ani = animation.FuncAnimation(fig, update, interval=100, blit=True)
+    plt.tight_layout()
+    print("[ppg_rt] plot open — close window to exit")
+    try:
+        plt.show()
+    finally:
+        reader.close()
+        print("[ppg_rt] done")
 
-        if n > 0:
 
-            x_axis = range(n)
-
-            ir_list = list(ir_buf)
-            fil_list = list(fil_buf)
-
-            line_ir.set_data(
-                x_axis,
-                ir_list
-            )
-
-            line_fil.set_data(
-                x_axis,
-                fil_list
-            )
-
-            line_zoom.set_data(
-                x_axis,
-                fil_list
-            )
-
-            # Auto scale raw + filtered
-            axes[0].relim()
-            axes[0].autoscale_view()
-
-            axes[1].relim()
-            axes[1].autoscale_view()
-
-            # Zoomed pulse waveform
-            if len(fil_list) > 10:
-
-                ymin = min(fil_list) - 50
-                ymax = max(fil_list) + 50
-
-                if ymin == ymax:
-                    ymin -= 1
-                    ymax += 1
-
-                axes[2].set_xlim(
-                    0,
-                    len(fil_list)
-                )
-
-                axes[2].set_ylim(
-                    ymin,
-                    ymax
-                )
-
-        plt.pause(0.01)
-
-# ============================================================
-# EXIT
-# ============================================================
-except KeyboardInterrupt:
-
-    print("\nStopping monitor...")
-
-finally:
-
-    csv_file.close()
-
-    sock.close()
-
-    print(f"CSV saved to: {CSV_FILE}")
+if __name__ == "__main__":
+    main()

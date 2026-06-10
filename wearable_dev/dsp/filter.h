@@ -49,19 +49,23 @@ typedef struct {
 } dc_filter_t;
 
 /* ── NLMS adaptive filter ── */
-#define NLMS_TAPS 32
+#define NLMS_TAPS_MAX     32   /* array capacity                */
+#define NLMS_TAPS_DEFAULT 32   /* ECG default (legacy NLMS_TAPS) */
 typedef struct {
-    float    w[NLMS_TAPS];
-    float    x[NLMS_TAPS];
+    float    w[NLMS_TAPS_MAX];
+    float    x[NLMS_TAPS_MAX];
     uint16_t idx;
+    uint16_t n;                /* runtime tap count (<= NLMS_TAPS_MAX) */
     float    mu;
     float    eps;
 } nlms_t;
 
-#define ALE_DELAY 15
+#define ALE_DELAY_MAX     32   /* array capacity                  */
+#define ALE_DELAY_DEFAULT 15   /* ECG default (legacy ALE_DELAY)   */
 typedef struct {
-    float    buf[ALE_DELAY];
+    float    buf[ALE_DELAY_MAX];
     uint16_t idx;
+    uint16_t n;                /* runtime delay length (<= ALE_DELAY_MAX) */
 } delay_t;
 
 /* ── Direct-Form II transposed biquad (primary DSP path) ── */
@@ -89,9 +93,11 @@ float iir2_filter(iir2_typedef *iir2, float x, float x1, float x2, float y1, flo
 float iir1_filter_rb(iir1_typedef *iir1, iir1_state *s, float x);
 float iir2_filter_rb(iir2_typedef *iir2, iir2_state *s, float x);
 
-void  nlms_init(nlms_t *f, float mu, float eps);
+void  nlms_init(nlms_t *f, float mu, float eps);              /* ECG default taps */
+void  nlms_init_n(nlms_t *f, uint16_t n, float mu, float eps); /* runtime tap count */
 float nlms_step(nlms_t *f, float x_new, float d);
-void  delay_init(delay_t *d);
+void  delay_init(delay_t *d);                                 /* ECG default delay */
+void  delay_init_d(delay_t *d, uint16_t delay);               /* runtime delay length */
 float delay_process(delay_t *d, float x);
 float ale_process(nlms_t *nlms, delay_t *delay, float x);
 
@@ -102,13 +108,16 @@ float biquad_step(biquad_df2t_t *f, float x);
 void  iir1_init(iir1_df2t_t *f, float b0, float b1, float a1);
 float iir1_step(iir1_df2t_t *f, float x);
 
-/* ── Savitzky-Golay smoothing (window=11, polynomial order=3) ── */
-#define SG_WINDOW 11
+/* ── Savitzky-Golay smoothing (quadratic/cubic, runtime window) ── */
+#define SG_WINDOW_MAX 21   /* array capacity (odd)                  */
 typedef struct {
-    float   buf[SG_WINDOW];
+    float   buf[SG_WINDOW_MAX];
+    float   coeffs[SG_WINDOW_MAX];  /* normalized SG smoothing coeffs */
+    uint8_t n;                      /* runtime window (odd, <= MAX)    */
     uint8_t head;
 } sg_filter_t;
-void  sg_init(sg_filter_t *f);
+void  sg_init(sg_filter_t *f);             /* ECG default window = 11 */
+void  sg_init_n(sg_filter_t *f, uint8_t window); /* runtime odd window */
 float sg_step(sg_filter_t *f, float x);
 
 /* ── Runtime coefficient calculators (bilinear transform) ── */

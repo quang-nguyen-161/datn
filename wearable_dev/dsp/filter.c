@@ -198,24 +198,35 @@ float iir1_filter_rb(iir1_typedef *iir1, iir1_state *s, float x)
 
 
 
-void nlms_init(nlms_t *f, float mu, float eps)
+void nlms_init_n(nlms_t *f, uint16_t n, float mu, float eps)
 {
+    if (n > NLMS_TAPS_MAX) n = NLMS_TAPS_MAX;
+    if (n == 0)            n = 1;
     memset(f->w, 0, sizeof(f->w));
     memset(f->x, 0, sizeof(f->x));
     f->idx = 0;
-    f->mu = mu;
+    f->n   = n;
+    f->mu  = mu;
     f->eps = eps;
 }
+
+void nlms_init(nlms_t *f, float mu, float eps)
+{
+    nlms_init_n(f, NLMS_TAPS_DEFAULT, mu, eps);
+}
+
 float nlms_step(nlms_t *f, float x_new, float d)
 {
+    uint16_t N = f->n;
+
     f->x[f->idx] = x_new;
 
     float y = 0.0f;
     float norm = 0.0f;
 
-    for (int i = 0; i < NLMS_TAPS; i++)
+    for (int i = 0; i < N; i++)
     {
-        int index = (f->idx + NLMS_TAPS - i) % NLMS_TAPS;
+        int index = (f->idx + N - i) % N;
         float xi = f->x[index];
 
         y += f->w[i] * xi;
@@ -225,23 +236,31 @@ float nlms_step(nlms_t *f, float x_new, float d)
     float e = d - y;
     float g = f->mu / (norm + f->eps);
 
-    for (int i = 0; i < NLMS_TAPS; i++)
+    for (int i = 0; i < N; i++)
     {
-        int index = (f->idx + NLMS_TAPS - i) % NLMS_TAPS;
+        int index = (f->idx + N - i) % N;
         f->w[i] += g * e * f->x[index];
     }
 
-    f->idx = (f->idx + 1) % NLMS_TAPS;
+    f->idx = (f->idx + 1) % N;
 
-    return y;   
+    return y;
 }
 
 
 
-void delay_init(delay_t *d)
+void delay_init_d(delay_t *d, uint16_t delay)
 {
+    if (delay > ALE_DELAY_MAX) delay = ALE_DELAY_MAX;
+    if (delay == 0)            delay = 1;
     memset(d->buf, 0, sizeof(d->buf));
     d->idx = 0;
+    d->n   = delay;
+}
+
+void delay_init(delay_t *d)
+{
+    delay_init_d(d, ALE_DELAY_DEFAULT);
 }
 
 float delay_process(delay_t *d, float x)
@@ -249,7 +268,7 @@ float delay_process(delay_t *d, float x)
     float y = d->buf[d->idx];   // delayed output
 
     d->buf[d->idx] = x;         // store new sample
-    d->idx = (d->idx + 1) % ALE_DELAY;
+    d->idx = (d->idx + 1) % d->n;
 
     return y;
 }
@@ -307,34 +326,55 @@ void iir1_init(iir1_df2t_t *f, float b0, float b1, float a1)
 
 
 /* ================================================================== */
-/*  Savitzky-Golay FIR (window=11, poly order=3, norm=429)            */
-/*  Coefficients: least-squares polynomial fit, centre index 5        */
-/*  Output has a 5-sample group delay at 250 Hz = 20 ms               */
+/*  Savitzky-Golay FIR — quadratic/cubic smoothing, runtime window     */
+/*                                                                    */
+/*  Closed-form coefficients (Savitzky-Golay 1964) for window          */
+/*  m = 2h+1, offset i in [-h, h]:                                     */
+/*     c_i = (3m^2 - 7 - 20 i^2) / 4 ,  norm = m(m^2 - 4)/3            */
+/*  For m=11 this reproduces {-36,9,44,69,84,89,...}/429 exactly.       */
+/*  Group delay = h samples.                                           */
 /* ================================================================== */
-static const float sg_coeffs[SG_WINDOW] = {
-    -36.0f,  9.0f, 44.0f, 69.0f, 84.0f,
-     89.0f, 84.0f, 69.0f, 44.0f,  9.0f, -36.0f
-};
-#define SG_NORM 429.0f
+
+void sg_init_n(sg_filter_t *f, uint8_t window)
+{
+    if (window > SG_WINDOW_MAX) window = SG_WINDOW_MAX;
+    if (window < 3)             window = 3;
+    if ((window & 1) == 0)      window--;        /* force odd */
+
+    int   m    = window;
+    int   h    = window / 2;
+    float norm = (float)m * ((float)m * m - 4.0f) / 3.0f;
+
+    for (int idx = 0; idx < window; idx++) {
+        int i = idx - h;                          /* -h .. h */
+        f->coeffs[idx] =
+            ((3.0f * m * m - 7.0f - 20.0f * (float)i * i) / 4.0f) / norm;
+    }
+
+    memset(f->buf, 0, sizeof(f->buf));
+    f->n    = (uint8_t)window;
+    f->head = 0;
+}
 
 void sg_init(sg_filter_t *f)
 {
-    memset(f->buf, 0, sizeof(f->buf));
-    f->head = 0;
+    sg_init_n(f, 11);   /* ECG default window */
 }
 
 float sg_step(sg_filter_t *f, float x)
 {
+    uint8_t N = f->n;
+
     f->buf[f->head] = x;
-    f->head = (f->head + 1) % SG_WINDOW;
+    f->head = (f->head + 1) % N;
 
     /* After advancing, head points to the oldest sample.
-       Walk forward so c[0] multiplies oldest, c[10] multiplies newest. */
+       Walk forward so c[0] multiplies oldest, c[N-1] multiplies newest. */
     float acc = 0.0f;
-    for (uint8_t i = 0; i < SG_WINDOW; i++) {
-        acc += sg_coeffs[i] * f->buf[(f->head + i) % SG_WINDOW];
+    for (uint8_t i = 0; i < N; i++) {
+        acc += f->coeffs[i] * f->buf[(f->head + i) % N];
     }
-    return acc / SG_NORM;
+    return acc;
 }
 
 

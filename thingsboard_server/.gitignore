@@ -1,0 +1,9 @@
+# Installer binary — large, not source, shouldn't be versioned
+Docker Desktop Installer.exe
+
+# Docker volumes / runtime data
+data/
+logs/
+
+node_modules/
+*.log
