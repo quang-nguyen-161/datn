@@ -3,6 +3,11 @@
 $CLOUDFLARED     = "D:\cloudflared.exe"
 $VERCEL_TOKEN    = $env:VERCEL_TOKEN
 $PROJECT_ID      = "prj_MeU6nk1DzZt9YZfExNVHk3ezfnRs"
+
+if (-not $VERCEL_TOKEN) {
+    Write-Host "ERROR: Set the VERCEL_TOKEN environment variable before running this script." -ForegroundColor Red
+    exit 1
+}
 $LAST_DEPLOY_ID  = "dpl_BgApDU46Y5pqzymkqKjs2SKQ1WVz"
 
 # Env var IDs
