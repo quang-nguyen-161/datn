@@ -1,5 +1,6 @@
 #include "gc9a01.h"
-#include "main.h"       /* m_lcd_spi */
+#include "main.h"          /* board pin map: LCD_*_Pin */
+#include "peripheral.h"    /* spi_init(), m_lcd_spi */
 
 #include <stdbool.h>
 #include "nrf_gpio.h"
@@ -64,14 +65,9 @@ void GC9A01_write_continue(uint8_t *data, size_t len) {
 /***** Hardware and soft func *******************************************************/
 bool lcd_spi_init(void) {
 
-    nrf_drv_spi_config_t spi_config = NRF_DRV_SPI_DEFAULT_CONFIG;
-    spi_config.miso_pin = NRF_DRV_SPI_PIN_NOT_USED;
-    spi_config.mosi_pin = LCD_MOSI_PIN;
-    spi_config.sck_pin = LCD_SCK_PIN;
-    spi_config.frequency = NRF_DRV_SPI_FREQ_8M;
-    ret_code_t err = nrf_drv_spi_init(&m_lcd_spi, &spi_config, NULL, NULL);
-    if (err != NRF_SUCCESS) {
-        NRF_LOG_WARNING("[LCD] SPI init failed: 0x%08X", err);
+    /* SPI0 bus brought up in peripheral.c; LCD GPIO stays here. */
+    if (!spi_init()) {
+        NRF_LOG_WARNING("[LCD] SPI bus init failed");
         return false;
     }
 
@@ -80,7 +76,7 @@ bool lcd_spi_init(void) {
     nrf_gpio_cfg_output(LCD_CS_Pin);
     nrf_gpio_cfg_output(LCD_DC_Pin);
 
-    NRF_LOG_INFO("[LCD] SPI init OK.");
+    NRF_LOG_INFO("[LCD] init OK.");
     return true;
 }
 

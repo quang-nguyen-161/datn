@@ -1,8 +1,64 @@
 #include "flash_user.h"
+#include "device_mode.h"
+#include "cmd.h"
 
 bool volatile m_fds_initialized;
 static bool   s_fds_init_failed;
 static volatile bool s_fds_write_done;
+static volatile bool s_cfg_dirty;
+
+static char const * fds_evt_str[] =
+{
+    "FDS_EVT_INIT",
+    "FDS_EVT_WRITE",
+    "FDS_EVT_UPDATE",
+    "FDS_EVT_DEL_RECORD",
+    "FDS_EVT_DEL_FILE",
+    "FDS_EVT_GC",
+};
+
+/* Default configuration data written on first boot. */
+static configuration_t m_dummy_cfg =
+{
+    .config1_on  = false,
+    .config2_on  = true,
+    .boot_count  = 0x0,
+    .device_name = "ECG_dev",
+    .last_mode   = 0,       /* MODE_CONTINUOUS */
+    .period_ms_lo = 10000,  /* 10 s default periodic interval (low word) */
+    .period_ms_hi = 0,
+
+    .ecg_sample_us   = 4000U,
+    .ecg_pkt_samples = 50U,
+
+    .ppg_sample_freq = 100U,
+    .ppg_red_ma      = 6U,
+    .ppg_ir_ma       = 6U,
+
+    .vital_interval_ms = 1000U,
+
+    .thr_ppg  = {30, 100, 40, 50, 60, 130},
+    .thr_ecg  = {40, 100, 50, 120, 40, 130},
+    .thr_spo2 = {90, 100, 90, 100, 88, 100},
+    .thr_temp = {361, 372, 355, 385, 350, 395},
+};
+
+/* A record containing dummy configuration data. */
+static fds_record_t const m_dummy_record =
+{
+    .file_id           = CONFIG_FILE,
+    .key               = CONFIG_REC_KEY,
+    .data.p_data       = &m_dummy_cfg,
+    /* The length of a record is always expressed in 4-byte units (words). */
+    .data.length_words = (sizeof(m_dummy_cfg) + 3) / sizeof(uint32_t),
+};
+
+/* Keep track of the progress of a delete_all operation. */
+static struct
+{
+    bool delete_next;   //!< Delete next record.
+    bool pending;       //!< Waiting for an fds FDS_EVT_DEL_RECORD event, to delete the next record.
+} m_delete_all;
 
 extern const char *fds_err_str(ret_code_t ret)
 {
@@ -108,7 +164,7 @@ void wait_for_fds_ready(void)
     }
 }
 
-ret_code_t m_record_init()
+ret_code_t m_record_init(void)
 {
 		ret_code_t rc;
 	 /* Register first to receive an event when initialization is complete. */
@@ -298,7 +354,7 @@ ret_code_t m_record_update(uint32_t fid, uint32_t key, uint8_t * data, uint32_t 
     return rc;
 }
 
-ret_code_t m_record_gc()
+ret_code_t m_record_gc(void)
 {
 	return fds_gc();
 }
@@ -380,5 +436,147 @@ ret_code_t m_record_list_all(void)
 
     NRF_LOG_INFO("End of record list.");
 		return rc;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  Persisted configuration — operating mode, sensor params,
+ *  and vital thresholds
+ * ════════════════════════════════════════════════════════════ */
+void flash_user_load_config(void)
+{
+    if (m_dummy_cfg.last_mode < MODE_COUNT)
+    {
+        g_device_mode = (device_mode_t)m_dummy_cfg.last_mode;
+    }
+    if (m_dummy_cfg.period_ms_lo != 0)
+    {
+        g_period_ms = m_dummy_cfg.period_ms_lo;
+    }
+    if (m_dummy_cfg.period_ms_hi != 0)
+    {
+        g_capture_ms = m_dummy_cfg.period_ms_hi;   /* reused field: PERIODIC capture window (ms) */
+    }
+
+    if (m_dummy_cfg.ecg_sample_us != 0)
+    {
+        g_cmd_sample_us = m_dummy_cfg.ecg_sample_us;
+    }
+    if (m_dummy_cfg.ecg_pkt_samples != 0)
+    {
+        g_cmd_pkt_samples = m_dummy_cfg.ecg_pkt_samples;
+    }
+
+    if (m_dummy_cfg.ppg_sample_freq != 0)
+    {
+        g_ppg_sample_freq = m_dummy_cfg.ppg_sample_freq;
+    }
+    g_ppg_red_ma = m_dummy_cfg.ppg_red_ma;
+    g_ppg_ir_ma  = m_dummy_cfg.ppg_ir_ma;
+
+    if (m_dummy_cfg.vital_interval_ms != 0)
+    {
+        g_vital_interval_ms = m_dummy_cfg.vital_interval_ms;
+    }
+
+    g_ecg_stream_enabled = m_dummy_cfg.config1_on;   /* reused legacy bool: ECG stream flag */
+
+    g_thr_ppg_norm_min = m_dummy_cfg.thr_ppg[0];
+    g_thr_ppg_norm_max = m_dummy_cfg.thr_ppg[1];
+    g_thr_ppg_warn_min = m_dummy_cfg.thr_ppg[2];
+    g_thr_ppg_warn_max = m_dummy_cfg.thr_ppg[3];
+    g_thr_ppg_dang_min = m_dummy_cfg.thr_ppg[4];
+    g_thr_ppg_dang_max = m_dummy_cfg.thr_ppg[5];
+
+    g_thr_ecg_norm_min = m_dummy_cfg.thr_ecg[0];
+    g_thr_ecg_norm_max = m_dummy_cfg.thr_ecg[1];
+    g_thr_ecg_warn_min = m_dummy_cfg.thr_ecg[2];
+    g_thr_ecg_warn_max = m_dummy_cfg.thr_ecg[3];
+    g_thr_ecg_dang_min = m_dummy_cfg.thr_ecg[4];
+    g_thr_ecg_dang_max = m_dummy_cfg.thr_ecg[5];
+
+    g_thr_spo2_norm_min = m_dummy_cfg.thr_spo2[0];
+    g_thr_spo2_norm_max = m_dummy_cfg.thr_spo2[1];
+    g_thr_spo2_warn_min = m_dummy_cfg.thr_spo2[2];
+    g_thr_spo2_warn_max = m_dummy_cfg.thr_spo2[3];
+    g_thr_spo2_dang_min = m_dummy_cfg.thr_spo2[4];
+    g_thr_spo2_dang_max = m_dummy_cfg.thr_spo2[5];
+
+    g_thr_temp_norm_min = m_dummy_cfg.thr_temp[0];
+    g_thr_temp_norm_max = m_dummy_cfg.thr_temp[1];
+    g_thr_temp_warn_min = m_dummy_cfg.thr_temp[2];
+    g_thr_temp_warn_max = m_dummy_cfg.thr_temp[3];
+    g_thr_temp_dang_min = m_dummy_cfg.thr_temp[4];
+    g_thr_temp_dang_max = m_dummy_cfg.thr_temp[5];
+
+    NRF_LOG_INFO("FDS: config loaded — mode=%u period=%ums ecg=%uus/%usmp ppg=%uHz vital=%ums",
+                 (unsigned)g_device_mode, (unsigned)g_period_ms,
+                 (unsigned)g_cmd_sample_us, (unsigned)g_cmd_pkt_samples,
+                 (unsigned)g_ppg_sample_freq, (unsigned)g_vital_interval_ms);
+}
+
+void flash_user_mark_dirty(void)
+{
+    s_cfg_dirty = true;
+}
+
+bool flash_user_config_dirty(void)
+{
+    return s_cfg_dirty;
+}
+
+void flash_user_save_config(void)
+{
+    m_dummy_cfg.last_mode    = (uint8_t)g_device_mode;
+    m_dummy_cfg.period_ms_lo = g_period_ms;
+    m_dummy_cfg.period_ms_hi = g_capture_ms;   /* reused field: PERIODIC capture window (ms) */
+
+    m_dummy_cfg.ecg_sample_us   = g_cmd_sample_us;
+    m_dummy_cfg.ecg_pkt_samples = g_cmd_pkt_samples;
+
+    m_dummy_cfg.ppg_sample_freq = g_ppg_sample_freq;
+    m_dummy_cfg.ppg_red_ma      = g_ppg_red_ma;
+    m_dummy_cfg.ppg_ir_ma       = g_ppg_ir_ma;
+
+    m_dummy_cfg.vital_interval_ms = g_vital_interval_ms;
+
+    m_dummy_cfg.config1_on = g_ecg_stream_enabled;   /* reused legacy bool: ECG stream flag */
+
+    m_dummy_cfg.thr_ppg[0] = g_thr_ppg_norm_min;
+    m_dummy_cfg.thr_ppg[1] = g_thr_ppg_norm_max;
+    m_dummy_cfg.thr_ppg[2] = g_thr_ppg_warn_min;
+    m_dummy_cfg.thr_ppg[3] = g_thr_ppg_warn_max;
+    m_dummy_cfg.thr_ppg[4] = g_thr_ppg_dang_min;
+    m_dummy_cfg.thr_ppg[5] = g_thr_ppg_dang_max;
+
+    m_dummy_cfg.thr_ecg[0] = g_thr_ecg_norm_min;
+    m_dummy_cfg.thr_ecg[1] = g_thr_ecg_norm_max;
+    m_dummy_cfg.thr_ecg[2] = g_thr_ecg_warn_min;
+    m_dummy_cfg.thr_ecg[3] = g_thr_ecg_warn_max;
+    m_dummy_cfg.thr_ecg[4] = g_thr_ecg_dang_min;
+    m_dummy_cfg.thr_ecg[5] = g_thr_ecg_dang_max;
+
+    m_dummy_cfg.thr_spo2[0] = g_thr_spo2_norm_min;
+    m_dummy_cfg.thr_spo2[1] = g_thr_spo2_norm_max;
+    m_dummy_cfg.thr_spo2[2] = g_thr_spo2_warn_min;
+    m_dummy_cfg.thr_spo2[3] = g_thr_spo2_warn_max;
+    m_dummy_cfg.thr_spo2[4] = g_thr_spo2_dang_min;
+    m_dummy_cfg.thr_spo2[5] = g_thr_spo2_dang_max;
+
+    m_dummy_cfg.thr_temp[0] = g_thr_temp_norm_min;
+    m_dummy_cfg.thr_temp[1] = g_thr_temp_norm_max;
+    m_dummy_cfg.thr_temp[2] = g_thr_temp_warn_min;
+    m_dummy_cfg.thr_temp[3] = g_thr_temp_warn_max;
+    m_dummy_cfg.thr_temp[4] = g_thr_temp_dang_min;
+    m_dummy_cfg.thr_temp[5] = g_thr_temp_dang_max;
+
+    ret_code_t rc = m_record_update(CONFIG_FILE, CONFIG_REC_KEY,
+                                     (uint8_t *)&m_dummy_cfg, sizeof(m_dummy_cfg));
+    if (rc == FDS_ERR_NO_SPACE_IN_FLASH)
+    {
+        NRF_LOG_WARNING("FDS: no space, triggering GC before retry.");
+        fds_gc();
+        return; /* leave dirty — retry on next loop pass */
+    }
+    s_cfg_dirty = (rc != NRF_SUCCESS);
 }
 

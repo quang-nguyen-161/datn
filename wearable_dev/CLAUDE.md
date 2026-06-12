@@ -25,9 +25,9 @@ Streams ECG waveform + vitals over BLE to an ESP32 gateway, which publishes to T
 | Timer | Owner |
 |-------|-------|
 | TIMER0 | SoftDevice (reserved) |
-| TIMER1 | PWM (APP_PWM_INSTANCE) |
-| TIMER2 | `timer2_now()` µs counter (max.c) |
-| TIMER3 | SAADC PPI 250 Hz ECG (ecg.c) — **never reassign** |
+| TIMER1 | PWM (reserved; `pwm_init()` stub in peripheral.c) |
+| TIMER2 | `timer2_now()` µs counter (peripheral.c) |
+| TIMER3 | SAADC PPI 250 Hz ECG (peripheral.c) — **never reassign** |
 
 ---
 
@@ -35,19 +35,20 @@ Streams ECG waveform + vitals over BLE to an ESP32 gateway, which publishes to T
 
 | Path | Purpose |
 |------|---------|
-| `main.c / main.h` | Top-level init, BLE stack, TWI/SPI init, main loop, vitals BLE send |
-| `ecg/ecg.c` | SAADC+PPI init at 250 Hz, DSP pipeline, R-peak v1+v2, `ecg_set_sample_us()` |
-| `ecg/ecg.h` | `ecg_init()`, `ecg_process()`, `ecg_set_sample_us()`, ECG result struct |
+| `main.c / main.h` | Top-level init, main loop, vitals BLE send; main.h holds the **board pin map** (per-target `NRF52840_XXAA`/nRF52832 macros) + `sensor_data_t` |
+| `peripheral/peripheral.c/.h` | **All on-chip peripheral init/callbacks/instances**: TWI1 (`twi_init`/`twi_wait`/`m_twi`), SPI0 (`spi_init`/`m_lcd_spi`), SAADC+PPI+TIMER3 (`adc_init`/`adc_set_sample_us`/`saadc_callback`/`g_ecg_raw`/`g_ecg_ready`), TIMER2 (`timer2_init`/`timer2_now`), PWM stub (`pwm_init`) |
+| `ecg/ecg.c` | ECG DSP pipeline + R-peak v1+v2 (calls `adc_init()` from peripheral.c) |
+| `ecg/ecg.h` | `ecg_init()`, `ecg_process()`, ECG result struct |
 | `cmd/cmd.c` | Gateway RX command parser — CMD_ECG_CFG / CMD_THR / CMD_PPG_CFG / CMD_VITAL_CFG |
 | `cmd/cmd.h` | Command codes 0xCF/CE/CD/CC, all volatile config globals |
 | `ble/cus_service.c/h` | Custom GATT service — TX notify 0x1401, RX write 0x1402 |
 | `app/device_mode.c/h` | Operating mode FSM (CONTINUOUS/PERIODIC/ECG), FDS persistence, `g_sensor_tick` |
 | `dsp/filter.c/h` | Biquad DF2T, NLMS ALE, Savitzky-Golay, bilinear coeff calculators |
-| `drivers/ppg/max.c` | MAX30102 I2C driver: init, FIFO read, streaming `max30102_process()`, register setters |
+| `drivers/ppg/max.c` | MAX30102 I2C driver: init, FIFO read, streaming `max30102_process()`, register setters (uses `timer2_now()` from peripheral.c) |
 | `drivers/ppg/max30102.h` | Register map, mode/SR/PW enums, public API including `max30102_set_sampling_rate/led_current` |
 | `drivers/accel/mma845.c/h` | MMA8452Q I2C driver |
 | `drivers/accel/pedometer.c/h` | Dynamic-threshold step counter, cadence EMA |
-| `drivers/display/GC9A01.c/h` | SPI LCD driver |
+| `drivers/display/GC9A01.c/h` | GC9A01 LCD driver (SPI0 bus via `spi_init()` in peripheral.c; LCD GPIO + draw ops here) |
 | `drivers/display/dashboard.c/h` | 4-row UI layout: BLE status / Temp+SpO2 / ECG+HR / Steps |
 | `drivers/temp/tmp117_v2.c/h` | TMP117 I2C driver (one-shot mode, 200 ms conversion) |
 | `drivers/temp/temp_filter.c/h` | median(3) + rate-limit + EMA(α=0.3) temperature smoother |
@@ -91,14 +92,14 @@ Pending flags are checked at the start of every sensor tick and applied immediat
 
 | CMD | Code | Bytes | Pending flag | Applied by |
 |-----|------|-------|--------------|------------|
-| CMD_ECG_CFG | 0xCF | 5 | `g_cmd_cfg_pending` | `ecg_set_sample_us(g_cmd_sample_us)` in main loop |
+| CMD_ECG_CFG | 0xCF | 5 | `g_cmd_cfg_pending` | `adc_set_sample_us(g_cmd_sample_us)` in main loop |
 | CMD_THR | 0xCE | 31 | — | threshold globals updated immediately, no pending |
 | CMD_PPG_CFG | 0xCD | 5 | `g_ppg_cfg_pending` | `max30102_set_sampling_rate()` + `set_led_current_1/2()` in main loop |
 | CMD_VITAL_CFG | 0xCC | 3 | `g_vital_cfg_pending` | vital BLE tick counter uses `g_vital_interval_ms / 10` directly |
 
 **Wire flow in main.c sensor tick:**
 ```c
-if (g_cmd_cfg_pending)      { g_cmd_cfg_pending = false;  ecg_set_sample_us(g_cmd_sample_us); }
+if (g_cmd_cfg_pending)      { g_cmd_cfg_pending = false;  adc_set_sample_us(g_cmd_sample_us); }
 if (g_ppg_cfg_pending)      { g_ppg_cfg_pending = false;  max30102_set_sampling_rate(...);
                                                             max30102_set_led_current_1/2(...); }
 if (g_vital_cfg_pending)    { g_vital_cfg_pending = false; }  /* interval read live below */
@@ -136,7 +137,7 @@ while (1) {
 - **SAADC** — GAIN1_6 + 0.6 V ref → max 3.6 V. AD8232 bias must stay in [0–3.6 V].
 - `g_ecg_raw`, `g_ecg_ready`, all cmd globals are `volatile` (ISR/BLE event ↔ main loop).
 - TWI is IRQ-driven (`twi_handler`); use `twi_wait()` after every transfer. Never call TWI drivers concurrently.
-- `ecg_set_sample_us()` updates TIMER3 CC0 live via `nrf_drv_timer_extended_compare` — safe while PPI is running.
+- `adc_set_sample_us()` (peripheral.c) updates TIMER3 CC0 live via `nrf_drv_timer_extended_compare` — safe while PPI is running.
 - `max30102_set_sampling_rate/led_current_1/2` write I2C registers directly — only call inside sensor tick to avoid bus conflicts.
 - `wearable_ecg - Copy/` is a backup snapshot — not the active source tree.
 

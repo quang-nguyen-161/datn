@@ -126,10 +126,11 @@ void max30102_set_a_full(uint8_t enable);
 /* ── Float ring-buffer HR/SpO2 algorithm (used by max30102_process) ── */
 void     rb_push(rb_t *rb, float value);
 bool     find_peak(rb_t *rb);
+bool     find_peak_thresh(rb_t *rb, float threshold);
 void     peak_time_push(rb_t *signal_rb, rb_t *dt_rb);
-uint32_t hr_count(rb_t *dt_rb, uint32_t peak_count);
-uint32_t spo2_count(dc_filter_t *dc_ir, dc_filter_t *dc_red,
-                    rb_t *ir_rb, rb_t *red_rb);
+uint32_t hr_count(rb_t *dt_rb, rb_t *w_rb, uint32_t peak_count);
+uint32_t spo2_count(rb_t *ir_acdc_rb, rb_t *red_acdc_rb,
+                    rb_t *ir_raw_rb, rb_t *red_raw_rb);
 
 /* ── Raw-uint32 ring-buffer HR/SpO2 algorithm (legacy variant, fallback) ── */
 void     ring_buffer_push(uint32_t *buff, uint32_t value, uint32_t size, uint32_t *head);
@@ -141,9 +142,7 @@ uint32_t hr_count1(uint32_t *delta_t_buff, uint32_t delta_size,
 uint32_t spo2_count1(uint32_t *ir_buff, uint32_t *red_buff,
                      uint32_t size, uint32_t head);
 
-/* Timer2 — free-running 1 MHz counter (µs resolution) */
-void     timer2_init(void);
-uint32_t timer2_now(void);
+/* Timer2 (µs counter) now lives in peripheral.h — timer2_init()/timer2_now(). */
 
 /* ══════════════════════════════════════════════════════════
  *  Adaptive Derivative-Envelope peak detector

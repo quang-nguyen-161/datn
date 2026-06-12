@@ -16,6 +16,7 @@ extern "C" {
 #define CMD_THR       0xCE  /* [CMD][ppg×6][ecg×6][spo2×6][temp×12]               31 B  */
 #define CMD_PPG_CFG   0xCD  /* [CMD][freqLo][freqHi][redMa][irMa]                   5 B  */
 #define CMD_VITAL_CFG 0xCC  /* [CMD][intervalLo][intervalHi]                         3 B  */
+#define CMD_MODE_CFG  0xCB  /* [CMD][mode][periodSecLo][periodSecHi][capSecLo][capSecHi][ecgEnabled]  7 B  */
 
 /* -----------------------------------------------------------------------
  * ECG reconfiguration  (CMD_ECG_CFG)
@@ -37,6 +38,13 @@ extern volatile uint8_t  g_ppg_ir_ma;        /* mA  — default 6    */
  * ----------------------------------------------------------------------- */
 extern volatile bool     g_vital_cfg_pending;
 extern volatile uint16_t g_vital_interval_ms; /* ms  — default 1000 */
+
+/* -----------------------------------------------------------------------
+ * ECG streaming flag  (CMD_MODE_CFG byte 6)
+ *   true  → stream ECG batches over BLE alongside vitals
+ *   false → process ECG (HR / LCD) but send no ECG batches
+ * ----------------------------------------------------------------------- */
+extern volatile bool     g_ecg_stream_enabled; /* default true */
 
 /* -----------------------------------------------------------------------
  * Vital thresholds — 3 tiers per vital sign.

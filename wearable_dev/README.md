@@ -24,10 +24,12 @@ temperature (TMP117), and acceleration (MMA8452Q), then streams data over BLE to
 
 ```
 wearable_dev/
-├── main.c / main.h          — top-level init, BLE stack, main loop
+├── main.c / main.h          — top-level init, main loop; main.h holds the board pin map
+├── peripheral/
+│   └── peripheral.c/h       — all on-chip peripherals: TWI1, SPI0, SAADC+PPI+TIMER3, TIMER2, PWM
 ├── ecg/
-│   ├── ecg.c                — SAADC PPI init, DSP pipeline, R-peak detection
-│   └── ecg.h                — ecg_init(), ecg_process(), ecg_set_sample_us()
+│   ├── ecg.c                — DSP pipeline + R-peak detection (calls adc_init() in peripheral.c)
+│   └── ecg.h                — ecg_init(), ecg_process()
 ├── cmd/
 │   ├── cmd.c                — gateway command parser (CMD_ECG_CFG / THR / PPG_CFG / VITAL_CFG)
 │   └── cmd.h                — command codes, config globals (g_cmd_*, g_ppg_*, g_vital_*)
@@ -48,7 +50,7 @@ wearable_dev/
 │   │   ├── pedometer.c/h    — dynamic-threshold step counter + cadence EMA
 │   │   └── accel_filter.c/h — accelerometer signal filtering
 │   ├── display/
-│   │   ├── GC9A01.c/h       — SPI LCD driver (240×240 round)
+│   │   ├── GC9A01.c/h       — GC9A01 LCD driver (SPI0 bus via spi_init(); LCD GPIO + draw ops)
 │   │   ├── dashboard.c/h    — 4-row UI layout, update functions
 │   │   └── lcd_power.c/h    — LCD backlight control
 │   └── temp/
@@ -65,9 +67,9 @@ wearable_dev/
 | Timer | Owner | Notes |
 |-------|-------|-------|
 | TIMER0 | SoftDevice | reserved — do not touch |
-| TIMER1 | PWM | APP_PWM_INSTANCE |
-| TIMER2 | µs counter | `timer2_init()` / `timer2_now()` in max.c |
-| TIMER3 | SAADC PPI | 250 Hz ECG — **do not reassign** |
+| TIMER1 | PWM | reserved; `pwm_init()` stub in peripheral.c |
+| TIMER2 | µs counter | `timer2_init()` / `timer2_now()` in peripheral.c |
+| TIMER3 | SAADC PPI | 250 Hz ECG (peripheral.c) — **do not reassign** |
 
 ---
 
@@ -138,7 +140,7 @@ MAX30102 FIFO (IR + RED, 18-bit)
 
 ## Key Constraints
 
-- **TIMER3** is exclusively owned by `ecg.c` for SAADC PPI — never reassign it.
+- **TIMER3** is exclusively owned by `peripheral.c` for SAADC PPI — never reassign it.
 - **SAADC gain**: GAIN1_6 + 0.6 V internal ref → full scale ≈ 3.6 V. AD8232 output must stay in [0–3.6 V].
 - `g_ecg_raw`, `g_ecg_ready` are `volatile` (ISR ↔ main loop).
 - All cmd config globals (`g_cmd_*`, `g_ppg_*`, `g_vital_*`) are `volatile` (BLE RX event ↔ main loop).

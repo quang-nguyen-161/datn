@@ -15,55 +15,39 @@
 
 extern bool volatile m_fds_initialized;
 
-static char const * fds_evt_str[] =
-{
-    "FDS_EVT_INIT",
-    "FDS_EVT_WRITE",
-    "FDS_EVT_UPDATE",
-    "FDS_EVT_DEL_RECORD",
-    "FDS_EVT_DEL_FILE",
-    "FDS_EVT_GC",
-};
-
-/* Default configuration data written on first boot. */
-static configuration_t m_dummy_cfg =
-{
-    .config1_on  = false,
-    .config2_on  = true,
-    .boot_count  = 0x0,
-    .device_name = "ECG_dev",
-    .last_mode   = 0,       /* MODE_CONTINUOUS */
-    .period_ms_lo = 10000,  /* 10 s default periodic interval (low word) */
-    .period_ms_hi = 0,
-};
-
-/* A record containing dummy configuration data. */
-static fds_record_t const m_dummy_record =
-{
-    .file_id           = CONFIG_FILE,
-    .key               = CONFIG_REC_KEY,
-    .data.p_data       = &m_dummy_cfg,
-    /* The length of a record is always expressed in 4-byte units (words). */
-    .data.length_words = (sizeof(m_dummy_cfg) + 3) / sizeof(uint32_t),
-};
-
-/* Keep track of the progress of a delete_all operation. */
-static struct
-{
-    bool delete_next;   //!< Delete next record.
-    bool pending;       //!< Waiting for an fds FDS_EVT_DEL_RECORD event, to delete the next record.
-} m_delete_all;
-
-
 extern void fds_evt_handler(fds_evt_t const * p_evt);
 extern const char *fds_err_str(ret_code_t ret);
 
 void wait_for_fds_ready(void);
-ret_code_t m_record_init();
+ret_code_t m_record_init(void);
 ret_code_t m_record_write(uint32_t fid, uint32_t key, uint8_t * data, uint32_t len);
 ret_code_t m_record_update(uint32_t fid, uint32_t key, uint8_t * data, uint32_t len);
 ret_code_t m_record_delete(uint32_t fid, uint32_t key);
-ret_code_t m_record_gc();
+ret_code_t m_record_gc(void);
 ret_code_t m_record_read(uint32_t fid, uint32_t key, uint8_t * data, uint32_t *len);
 ret_code_t m_record_list_all(void);
+
+/* ══════════════════════════════════════════════════════════════
+ *  Persisted configuration — operating mode, sensor params,
+ *  and vital thresholds (cmd.h / device_mode.h globals)
+ * ════════════════════════════════════════════════════════════ */
+
+/* Call once after m_record_init(): copies the loaded (or default)
+ * FDS record into the runtime globals (g_device_mode, g_period_ms,
+ * g_cmd_*, g_ppg_*, g_vital_interval_ms, g_thr_*). */
+void flash_user_load_config(void);
+
+/* Marks the in-flash config as stale. Call after any change to the
+ * globals above (mode/period switch, gateway CMD_* commands). Cheap
+ * and non-blocking — actual flash write happens in flash_user_save_config(). */
+void flash_user_mark_dirty(void);
+
+/* True if flash_user_mark_dirty() was called since the last successful save. */
+bool flash_user_config_dirty(void);
+
+/* Packs the runtime globals into the config record and queues an FDS
+ * update. Non-blocking. Call periodically from the main loop only when
+ * m_fds_initialized && flash_user_config_dirty(). */
+void flash_user_save_config(void);
+
 #endif

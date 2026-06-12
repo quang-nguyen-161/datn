@@ -1,5 +1,8 @@
 #include "cmd.h"
 #include "ble_gap.h"
+#include "flash_user.h"
+#include "device_mode.h"
+#undef NRF_LOG_MODULE_NAME
 #define NRF_LOG_MODULE_NAME cmd
 #include "nrf_log.h"
 NRF_LOG_MODULE_REGISTER();
@@ -20,6 +23,9 @@ volatile uint8_t  g_ppg_ir_ma        = 6U;    /* mA */
 /* Vital reporting interval */
 volatile bool     g_vital_cfg_pending = false;
 volatile uint16_t g_vital_interval_ms = 1000U; /* ms */
+
+/* ECG streaming flag — gates BLE ECG batch send (see cmd.h) */
+volatile bool     g_ecg_stream_enabled = true;
 
 /* PPG heart rate thresholds (bpm) */
 volatile uint8_t  g_thr_ppg_norm_min = 30;
@@ -96,6 +102,7 @@ bool cmd_rx_handle(const uint8_t *data, uint16_t len, uint16_t max_samples)
             g_cmd_sample_us   = us;
             g_cmd_pkt_samples = pkt;
             g_cmd_cfg_pending = true;
+            flash_user_mark_dirty();
 
             NRF_LOG_INFO("CMD_ECG_CFG: OK %u Hz, %u ms -> %u smp/pkt",
                          (unsigned)freq_hz, (unsigned)interval_ms, (unsigned)pkt);
@@ -151,6 +158,8 @@ bool cmd_rx_handle(const uint8_t *data, uint16_t len, uint16_t max_samples)
             g_thr_temp_dang_min = (uint16_t)data[27] | ((uint16_t)data[28] << 8);
             g_thr_temp_dang_max = (uint16_t)data[29] | ((uint16_t)data[30] << 8);
 
+            flash_user_mark_dirty();
+
             NRF_LOG_INFO("CMD_THR ppgHR norm=%u-%u", data[1],  data[2]);
             NRF_LOG_INFO("CMD_THR ppgHR warn=%u-%u", data[3],  data[4]);
             NRF_LOG_INFO("CMD_THR ppgHR dang=%u-%u", data[5],  data[6]);
@@ -198,6 +207,7 @@ bool cmd_rx_handle(const uint8_t *data, uint16_t len, uint16_t max_samples)
             g_ppg_red_ma       = data[3];
             g_ppg_ir_ma        = data[4];
             g_ppg_cfg_pending  = true;
+            flash_user_mark_dirty();
 
             NRF_LOG_INFO("CMD_PPG_CFG: OK %u Hz red=%u mA ir=%u mA",
                          (unsigned)freq, (unsigned)data[3], (unsigned)data[4]);
@@ -226,8 +236,49 @@ bool cmd_rx_handle(const uint8_t *data, uint16_t len, uint16_t max_samples)
 
             g_vital_interval_ms  = interval;
             g_vital_cfg_pending  = true;
+            flash_user_mark_dirty();
 
             NRF_LOG_INFO("CMD_VITAL_CFG: OK %u ms", (unsigned)interval);
+            return true;
+        }
+
+        /* -----------------------------------------------------------
+         * CMD_MODE_CFG 0xCB  —  7 bytes
+         * [CMD][mode][periodSecLo][periodSecHi][capSecLo][capSecHi][ecgEnabled]
+         * mode       : 0=CONTINUOUS 1=PERIODIC 2=ECG
+         * period     : PERIODIC wake-to-wake interval, seconds (uint16 LE)
+         * capture    : PERIODIC measurement window, seconds (uint16 LE)
+         * ecgEnabled : 0=no ECG batches, 1=stream ECG alongside vitals
+         * ----------------------------------------------------------- */
+        case CMD_MODE_CFG:
+        {
+            if (len != 7)
+            {
+                NRF_LOG_WARNING("CMD_MODE_CFG: bad len %u (expect 7)", (unsigned)len);
+                return false;
+            }
+
+            uint8_t  mode    = data[1];
+            uint16_t period  = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+            uint16_t capture = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+            if (mode >= MODE_COUNT)
+            {
+                NRF_LOG_WARNING("CMD_MODE_CFG: bad mode %u", (unsigned)mode);
+                return false;
+            }
+
+            /* Set period + capture first (clamped inside), then switch mode last
+             * so the phase machine recomputes against the new values. */
+            device_mode_set_period(period);
+            device_mode_set_capture(capture);
+            device_mode_set((device_mode_t)mode);
+
+            g_ecg_stream_enabled = (data[6] != 0);
+            flash_user_mark_dirty();
+
+            NRF_LOG_INFO("CMD_MODE_CFG: mode=%u period=%u ms cap=%u ms ecg=%u",
+                         (unsigned)mode, (unsigned)g_period_ms, (unsigned)g_capture_ms,
+                         (unsigned)g_ecg_stream_enabled);
             return true;
         }
 

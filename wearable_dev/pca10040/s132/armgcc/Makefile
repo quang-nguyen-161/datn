@@ -54,6 +54,7 @@ SRC_FILES += \
   $(SDK_ROOT)/components/libraries/bsp/bsp.c \
   $(SDK_ROOT)/components/libraries/bsp/bsp_btn_ble.c \
   $(PROJ_DIR)/main.c \
+  $(PROJ_DIR)/peripheral/peripheral.c \
   $(PROJ_DIR)/ble/ble_app.c \
   $(PROJ_DIR)/ble/cus_service.c \
   $(PROJ_DIR)/ecg/ecg.c \
@@ -110,6 +111,7 @@ SRC_FILES += \
 # Include folders common to all targets
 INC_FOLDERS += \
   $(PROJ_DIR) \
+  $(PROJ_DIR)/peripheral \
   $(PROJ_DIR)/ble \
   $(PROJ_DIR)/ecg \
   $(PROJ_DIR)/dsp \

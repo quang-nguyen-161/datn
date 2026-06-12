@@ -1,4 +1,5 @@
 import sys
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,7 +10,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 # =========================
 # CONFIG
 # =========================
-CSV_FILE  = "ecg_log.csv"
+CSV_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ecg_log_cong.csv")
 FS        = 250.0     # Hz
 T_START   = 0.0       # seconds
 T_END     = None      # seconds  (set to None for full recording)
@@ -121,6 +122,34 @@ py_full  = sp.lfilter(SG_B, [1.0], py_ale)   # causal FIR, matches hardware
 print(f"Python chain: sosfilt({BP_LO}–{BP_HI} Hz) → ALE(taps={NLMS_TAPS}, D={ALE_DELAY}) → SG(causal)")
 
 # =========================
+# R-PEAK DETECTION
+# Min RR = 0.3 s (200 bpm cap); height gated to 40% of the signal's std dev
+# so noise doesn't get counted as beats.
+# =========================
+MIN_RR_S = 0.3
+distance = int(MIN_RR_S * FS)
+
+def detect_peaks(sig):
+    height = 0.4 * np.std(sig)
+    peaks, _ = sp.find_peaks(sig, height=height, distance=distance)
+    return peaks
+
+def hr_from_peaks(peaks, fs):
+    if len(peaks) < 2:
+        return 0.0
+    rr = np.diff(peaks) / fs
+    return 60.0 / np.mean(rr)
+
+hw_peaks = detect_peaks(flt_win)
+py_peaks = detect_peaks(py_full)
+
+hw_hr = hr_from_peaks(hw_peaks, FS)
+py_hr = hr_from_peaks(py_peaks, FS)
+
+print(f"HW peaks:  {len(hw_peaks)}  (HR ≈ {hw_hr:.1f} bpm)")
+print(f"Python peaks: {len(py_peaks)}  (HR ≈ {py_hr:.1f} bpm)")
+
+# =========================
 # PLOT
 # =========================
 fig, (ax_raw, ax_flt) = plt.subplots(
@@ -169,6 +198,17 @@ ax_flt.plot(
     linewidth=0.9,
     linestyle="--",
     label=f"Python: sosfilt → ALE(D={ALE_DELAY}) → SG(causal)"
+)
+
+ax_flt.scatter(
+    t_win[hw_peaks], flt_win[hw_peaks],
+    color="tab:orange", marker="x", s=50, zorder=5,
+    label=f"HW peaks (HR≈{hw_hr:.0f} bpm)"
+)
+ax_flt.scatter(
+    t_win[py_peaks], py_full[py_peaks],
+    color="tab:red", marker="x", s=50, zorder=5,
+    label=f"Python peaks (HR≈{py_hr:.0f} bpm)"
 )
 
 ax_flt.set_title(

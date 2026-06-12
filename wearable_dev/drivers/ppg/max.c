@@ -1,38 +1,14 @@
 #include "max30102.h"
 #include "filter.h"
 #include "main.h"           /* m_twi, m_xfer_done, m_xfer_error, twi_wait() */
+#include "peripheral.h"     /* timer2_now() — TIMER2 µs counter */
 #include "nrf_drv_twi.h"
-#include "nrf_drv_timer.h"
 #include "nrf_delay.h"
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 #include "app_error.h"
 #include <math.h>
 #include <string.h>
-
-/* ══════════════════════════════════════════════════════════
- *  TIMER2 — free-running 1 MHz counter
- * ══════════════════════════════════════════════════════════ */
-
-static const nrf_drv_timer_t TIMER2 = NRF_DRV_TIMER_INSTANCE(2);
-
-static void timer2_handler(nrf_timer_event_t e, void *ctx) { (void)e; (void)ctx; }
-
-void timer2_init(void)
-{
-    nrf_drv_timer_config_t cfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
-    cfg.frequency = NRF_TIMER_FREQ_1MHz;
-    cfg.bit_width = NRF_TIMER_BIT_WIDTH_32;
-    ret_code_t err = nrf_drv_timer_init(&TIMER2, &cfg, timer2_handler);
-    APP_ERROR_CHECK(err);
-    nrf_drv_timer_enable(&TIMER2);
-}
-
-uint32_t timer2_now(void)
-{
-    nrf_drv_timer_capture(&TIMER2, NRF_TIMER_CC_CHANNEL0);
-    return nrf_drv_timer_capture_get(&TIMER2, NRF_TIMER_CC_CHANNEL0);
-}
 
 /* ══════════════════════════════════════════════════════════
  *  I2C helpers  (return false on NACK / bus error)
@@ -75,14 +51,14 @@ static bool ppg_read(uint8_t reg, uint8_t *data, uint16_t len)
 #define PPG_FINGER_THRESHOLD  30000U /* raw ADC count; ambient (no finger) ≈ 500 */
 #define PPG_FINGER_DEBOUNCE   5      /* consecutive sub-threshold samples → off   */
 
-static iir1_df2t_t s_ir_hp;    /* HP 0.5 Hz — baseline wander removal  */
-static iir1_df2t_t s_ir_lp;    /* LP 5.0 Hz — high-freq noise removal  */
+static biquad_df2t_t s_ir_hp;  /* HP 0.5 Hz — baseline wander removal  */
+static biquad_df2t_t s_ir_lp;  /* LP 5.0 Hz — high-freq noise removal  */
 static nlms_t      s_ir_nlms;  /* NLMS adaptive filter                  */
 static delay_t     s_ir_dly;   /* ALE decorrelation delay               */
 static sg_filter_t s_ir_sg;    /* Savitzky-Golay smoothing              */
 
-static iir1_df2t_t s_red_hp;
-static iir1_df2t_t s_red_lp;
+static biquad_df2t_t s_red_hp;
+static biquad_df2t_t s_red_lp;
 static nlms_t      s_red_nlms;
 static delay_t     s_red_dly;
 static sg_filter_t s_red_sg;
@@ -90,7 +66,12 @@ static sg_filter_t s_red_sg;
 /* ── Streaming HR/SpO2 ring-buffer state (used by max30102_process) ── */
 static rb_t        s_ir_rb;    /* filtered IR AC signal       */
 static rb_t        s_red_rb;   /* filtered RED AC signal       */
+static rb_t        s_ir_acdc_rb;  /* raw-DC IR AC (raw - dc_comp), for SpO2  */
+static rb_t        s_red_acdc_rb; /* raw-DC RED AC (raw - dc_comp), for SpO2 */
+static rb_t        s_ir_raw_rb;   /* raw IR samples, same window as acdc_rb  */
+static rb_t        s_red_raw_rb;  /* raw RED samples, same window as acdc_rb */
 static rb_t        s_dt_rb;    /* peak-to-peak intervals (µs)  */
+static rb_t        s_dt_w_rb;  /* env_peak at each accepted peak — confidence weight for hr_count */
 static dc_filter_t s_dc_ir;    /* raw IR DC (sliding mean)     */
 static dc_filter_t s_dc_red;   /* raw RED DC (sliding mean)    */
 static uint32_t    s_peak_count;
@@ -99,19 +80,25 @@ static uint32_t    s_sample_ctr;
 static uint32_t    s_dc_warmup;    /* samples remaining until DC window is full */
 static float       s_hr_hist[3];
 static float       s_spo2_hist[3];
+static float       s_last_hr_out;   /* last good HR/SpO2 — held when the other metric's window is invalid */
+static float       s_last_spo2_out;
 static uint8_t     s_no_finger_cnt;
 static bool        s_finger_on;
+static float       s_ir_env_peak; /* adaptive amplitude envelope for peak gating */
+
+#define PPG_PEAK_ENV_DECAY  0.992f /* slow envelope decay between beats */
+#define PPG_PEAK_THRESH_RATIO 0.4f /* fire only above 40% of envelope   */
 
 static void ppg_filters_init(void)
 {
-    butter1_hp_coeffs(100.0f, 0.5f, &s_ir_hp);
-    butter1_lp_coeffs(100.0f, 5.0f, &s_ir_lp);
+    butter2_hp_coeffs(100.0f, 1.0f, &s_ir_hp);
+    butter2_lp_coeffs(100.0f, 3.0f, &s_ir_lp);
     nlms_init_n(&s_ir_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
     delay_init_d(&s_ir_dly, PPG_ALE_DELAY);
     sg_init_n(&s_ir_sg, PPG_SG_WINDOW);
 
-    butter1_hp_coeffs(100.0f, 0.5f, &s_red_hp);
-    butter1_lp_coeffs(100.0f, 5.0f, &s_red_lp);
+    butter2_hp_coeffs(100.0f, 1.0f, &s_red_hp);
+    butter2_lp_coeffs(100.0f, 3.0f, &s_red_lp);
     nlms_init_n(&s_red_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
     delay_init_d(&s_red_dly, PPG_ALE_DELAY);
     sg_init_n(&s_red_sg, PPG_SG_WINDOW);
@@ -119,7 +106,12 @@ static void ppg_filters_init(void)
     /* reset streaming state */
     memset(&s_ir_rb,  0, sizeof(s_ir_rb));
     memset(&s_red_rb, 0, sizeof(s_red_rb));
+    memset(&s_ir_acdc_rb,  0, sizeof(s_ir_acdc_rb));
+    memset(&s_red_acdc_rb, 0, sizeof(s_red_acdc_rb));
+    memset(&s_ir_raw_rb,   0, sizeof(s_ir_raw_rb));
+    memset(&s_red_raw_rb,  0, sizeof(s_red_raw_rb));
     memset(&s_dt_rb,  0, sizeof(s_dt_rb));
+    memset(&s_dt_w_rb, 0, sizeof(s_dt_w_rb));
     memset(&s_dc_ir,  0, sizeof(s_dc_ir));
     memset(&s_dc_red, 0, sizeof(s_dc_red));
     s_peak_count      = 0;
@@ -132,8 +124,11 @@ static void ppg_filters_init(void)
     s_spo2_hist[0]    = 0.0f;
     s_spo2_hist[1]    = 0.0f;
     s_spo2_hist[2]    = 0.0f;
+    s_last_hr_out     = 0.0f;
+    s_last_spo2_out   = 0.0f;
     s_no_finger_cnt   = 0;
     s_finger_on       = false;
+    s_ir_env_peak     = 0.0f;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -166,18 +161,14 @@ bool max30102_init(void)
     ppg_write(FIFO_WRITE_POINTER_REGISTER, 0x00);
     ppg_write(OVER_FLOW_COUNTER_REGISTER, 0x00);
 
-    /* Same FIFO config as old driver */
-    ppg_write(FIFO_CONFIG_REGISTER, 0x0F);
-
-    /* SpO2 mode */
-    ppg_write(MODE_CONFIG_REGISTER, 0x03);
-
-    /* Exact value from previous debug version */
-    ppg_write(SPO2_CONFIG_REGISTER, 0x27);
-
-    /* Increase LED current for debugging */
-    ppg_write(LED_CURRENT_REGISTER_1, 0x1F);
-    ppg_write(LED_CURRENT_REGISTER_2, 0x1F);
+    /* Match reference init via the register-config helpers. */
+    max30102_set_fifo_config(max30102_smp_ave_1, 0, 17);
+    max30102_set_mode(max30102_spo2);
+    max30102_set_adc_resolution(max30102_adc_2048);
+    max30102_set_sampling_rate(max30102_sr_100);
+    max30102_set_led_pulse_width(max30102_pw_18_bit);
+    max30102_set_led_current_1(6);
+    max30102_set_led_current_2(6);
 
     /* Read back everything */
     ppg_read(MODE_CONFIG_REGISTER, &reg, 1);
@@ -309,7 +300,7 @@ void max30102_set_sampling_rate(max30102_sr_t sr)
 {
     uint8_t config;
     ppg_read(SPO2_CONFIG_REGISTER, &config, 1);
-    config = (config & 0x63) << SPO2_SR_SHIFT;
+    config = (config & ~(0x07 << SPO2_SR_SHIFT)) | (sr << SPO2_SR_SHIFT);
     ppg_write(SPO2_CONFIG_REGISTER, config);
 }
 
@@ -396,7 +387,7 @@ bool max30102_read_1_sample(uint32_t *ir, uint32_t *red)
     *red = (((uint32_t)raw[3] << 16) |
             ((uint32_t)raw[4] << 8)  |
              (uint32_t)raw[5]) & 0x03FFFFUL;
-		
+	
     return true;
 }
 /* ══════════════════════════════════════════════════════════
@@ -468,6 +459,28 @@ bool find_peak(rb_t *rb)
     return true;
 }
 
+/* Same local-maximum test as find_peak(), but additionally requires the
+ * candidate to exceed an adaptive amplitude threshold. Without this,
+ * find_peak() accepts any local max — including small noise ripples and
+ * the dicrotic notch — which inflates the peak count and reported HR. */
+bool find_peak_thresh(rb_t *rb, float threshold)
+{
+    int32_t curr_idx = (rb->rb_head + RB_SIZE - 5) % RB_SIZE;
+    float   curr     = rb_get(rb, curr_idx);
+
+    if (curr < threshold)
+        return false;
+
+    for (int i = 1; i <= 4; i++)
+    {
+        if (curr <= rb_get(rb, curr_idx - i))
+            return false;
+        if (curr <= rb_get(rb, curr_idx + i))
+            return false;
+    }
+    return true;
+}
+
 void peak_time_push(rb_t *signal_rb, rb_t *dt_rb)
 {
     static uint32_t last_peak_time = 0;
@@ -485,78 +498,152 @@ void peak_time_push(rb_t *signal_rb, rb_t *dt_rb)
     }
 }
 
-uint32_t hr_count(rb_t *dt_rb, uint32_t peak_count)
+uint32_t hr_count(rb_t *dt_rb, rb_t *w_rb, uint32_t peak_count)
 {
     if (peak_count < 2)
         return 0;
 
     const float MIN_DT = 300000.0f;
     const float MAX_DT = 2000000.0f;
+    const float MIN_WEIGHT = 1.0f; /* floor so a near-zero envelope doesn't zero out the interval */
 
     uint32_t valid_intervals = 0;
     float    total_dt = 0.0f;
+    float    total_w  = 0.0f;
 
     uint32_t intervals = peak_count - 1;
     if (intervals > RB_SIZE)
         intervals = RB_SIZE;
 
+    /* Envelope-weighted average RR: intervals detected on a strong pulse
+     * (high s_ir_env_peak at acceptance time) count more than ones detected
+     * on a weak/noisy envelope. */
     for (uint32_t i = 0; i < intervals; i++)
     {
         int32_t pos = (dt_rb->rb_head + RB_SIZE - 1 - i) % RB_SIZE;
         float   dt  = dt_rb->buff[pos];
+        float   w   = w_rb->buff[pos];
 
         if (dt < MIN_DT) continue;
         if (dt > MAX_DT) continue;
 
-        total_dt += dt;
+        if (w < MIN_WEIGHT) w = MIN_WEIGHT;
+
+        total_dt += dt * w;
+        total_w  += w;
         valid_intervals++;
     }
 
-    if (valid_intervals == 0 || total_dt <= 0.0f)
+    if (valid_intervals == 0 || total_dt <= 0.0f || total_w <= 0.0f)
         return 0;
 
-    float bpm = (60.0f * 1e6f * valid_intervals) / total_dt;
-    return (uint32_t)bpm;
+    float avg_dt = total_dt / total_w;
+    return (uint32_t)((60.0f * 1e6f) / avg_dt);
 }
 
-uint32_t spo2_count(dc_filter_t *dc_ir, dc_filter_t *dc_red,
-                    rb_t *ir_rb, rb_t *red_rb)
+uint32_t spo2_count(rb_t *ir_acdc_rb, rb_t *red_acdc_rb,
+                    rb_t *ir_raw_rb, rb_t *red_raw_rb)
 {
-    /* AC = peak-to-peak over the filtered ring buffers */
-    float ir_min = 1e9f, ir_max = -1e9f;
-    float red_min = 1e9f, red_max = -1e9f;
+    /* Robert Fraczkiewicz (RF) algorithm: DC = mean(raw), then remove DC and
+     * a linear baseline trend (regression vs. sample index), then
+     * AC = RMS of the detrended signal. R = (red_ac*ir_dc)/(ir_ac*red_dc).
+     * SpO2 = -45.060*R^2 + 30.354*R + 94.845, valid for R in (0.02, 1.84). */
+    (void)ir_acdc_rb;
+    (void)red_acdc_rb;
+
+#define RB_CHRONO(rb, i) ((rb)->buff[((rb)->rb_head + (i)) % RB_SIZE])
+
+    float ir_dc = 0.0f, red_dc = 0.0f;
+    for (int i = 0; i < RB_SIZE; i++)
+    {
+        ir_dc  += RB_CHRONO(ir_raw_rb, i);
+        red_dc += RB_CHRONO(red_raw_rb, i);
+    }
+    ir_dc  /= (float)RB_SIZE;
+    red_dc /= (float)RB_SIZE;
+
+    float ir_d[RB_SIZE], red_d[RB_SIZE];
+    const float mean_x = (float)(RB_SIZE - 1) / 2.0f;
+    float sum_x2 = 0.0f;
 
     for (int i = 0; i < RB_SIZE; i++)
     {
-        float ir  = ir_rb->buff[i];
-        float red = red_rb->buff[i];
+        float x = (float)i - mean_x;
+        sum_x2 += x * x;
 
-        if (ir  > ir_max)  ir_max  = ir;
-        if (ir  < ir_min)  ir_min  = ir;
-        if (red > red_max) red_max = red;
-        if (red < red_min) red_min = red;
+        ir_d[i]  = RB_CHRONO(ir_raw_rb, i)  - ir_dc;
+        red_d[i] = RB_CHRONO(red_raw_rb, i) - red_dc;
     }
 
-    float ir_ac  = ir_max  - ir_min;
-    float red_ac = red_max - red_min;
+#undef RB_CHRONO
 
-    /* DC from the raw sliding-mean filters */
-    float ir_dc  = dc_ir->dc_comp;
-    float red_dc = dc_red->dc_comp;
+    /* Remove linear trend (baseline leveling). */
+    float beta_ir = 0.0f, beta_red = 0.0f;
+    for (int i = 0; i < RB_SIZE; i++)
+    {
+        float x = (float)i - mean_x;
+        beta_ir  += x * ir_d[i];
+        beta_red += x * red_d[i];
+    }
+    beta_ir  /= sum_x2;
+    beta_red /= sum_x2;
+
+    float ir_sumsq = 0.0f, red_sumsq = 0.0f;
+    for (int i = 0; i < RB_SIZE; i++)
+    {
+        float x = (float)i - mean_x;
+        ir_d[i]  -= beta_ir  * x;
+        red_d[i] -= beta_red * x;
+        ir_sumsq  += ir_d[i]  * ir_d[i];
+        red_sumsq += red_d[i] * red_d[i];
+    }
+
+    float ir_ac  = sqrtf(ir_sumsq  / (float)RB_SIZE);
+    float red_ac = sqrtf(red_sumsq / (float)RB_SIZE);
+
+    NRF_LOG_INFO("PPG_DBG: ir_dc=%d ir_ac_x1000=%d red_dc=%d red_ac_x1000=%d",
+                 (int)ir_dc, (int)(ir_ac * 1000.0f),
+                 (int)red_dc, (int)(red_ac * 1000.0f));
 
     if (ir_ac <= 0.0f || red_ac <= 0.0f ||
         ir_dc <= 0.0f || red_dc <= 0.0f)
         return 0;
 
-    float R = (red_ac / red_dc) / (ir_ac / ir_dc);
+    float R = (red_ac * ir_dc) / (ir_ac * red_dc);
 
-    NRF_LOG_INFO("SPO2_DBG: R=%d.%03d ir_ac=%d ir_dc=%d red_ac=%d red_dc=%d",
-                 (int)R, (int)((R - (int)R) * 1000),
-                 (int)ir_ac, (int)ir_dc, (int)red_ac, (int)red_dc);
+    NRF_LOG_INFO("SPO2_DBG: R=%d.%03d ir_ac_x1000=%d red_ac_x1000=%d",
+                 (int)R, (int)((R - (int)R) * 1000.0f),
+                 (int)(ir_ac * 1000.0f), (int)(red_ac * 1000.0f));
 
-    float spo2 = 119.0f - 25.0f * R;
+    /* Calibration log: R once every 5 s (spo2_count() runs ~once/sec),
+     * for capture by ppg_r_log.py alongside a clinical SpO2 reference. */
+    static uint32_t s_rcal_ctr = 0;
+    if (++s_rcal_ctr >= 5)
+    {
+        s_rcal_ctr = 0;
+        NRF_LOG_INFO("RCAL: R=%d.%03d", (int)R, (int)((R - (int)R) * 1000.0f));
+    }
+
+    /* Empirical piecewise R->slope mapping (ported from legacy
+     * spo2_count1), rescaled to anchor R~2.2-2.7 (slope~0.284-0.304,
+     * measured against a CMS50D: avg R=2.405 -> spo2=98.3) near the
+     * top of the curve, while still reaching 85 at slope_max=0.529412
+     * (R>=10, severe desaturation) and clamping to 100 for low slope. */
+    float slope;
+    if (R <= 2.5f && R >= 0.8f)
+        slope = (R - 0.8f) / (2.5f - 0.8f) * (0.294118f - 0.241176f) + 0.241176f;
+    else if (R < 0.8f && R >= 0.0f)
+        slope = R / 0.8f * (0.235294f - 0.182353f) + 0.182353f;
+    else if (R > 2.5f && R <= 10.0f)
+        slope = (R - 2.5f) / (10.0f - 2.5f) * (0.470588f - 0.3f) + 0.3f;
+    else if (R > 10.0f)
+        slope = 0.529f;
+    else
+        slope = 0.24f;
+
+    float spo2 = 114.6f - 55.85f * slope;
     if (spo2 > 100.0f) spo2 = 100.0f;
-    if (spo2 <   0.0f) spo2 =   0.0f;
+    if (spo2 <  85.0f) spo2 =  85.0f;
 
     return (uint32_t)spo2;
 }
@@ -755,39 +842,78 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     s_no_finger_cnt = 0;
     if (!s_finger_on)
     {
-        /* Preload HP filter state so the DC-removal transient starts at zero
-         * instead of decaying from ~raw_value over 4+ seconds. */
+        /* Preload the DC sliding-mean window with the current sample so
+         * dc_comp starts at the right level immediately, instead of
+         * ramping up from zero over ~1.25 s. */
+        for (int i = 0; i < DC_WINDOW; i++)
+        {
+            s_dc_ir.buf[i]  = (float)ir_raw;
+            s_dc_red.buf[i] = (float)red_raw;
+        }
+        s_dc_ir.sum      = (float)ir_raw  * DC_WINDOW;
+        s_dc_red.sum     = (float)red_raw * DC_WINDOW;
+        s_dc_ir.dc_comp  = (float)ir_raw;
+        s_dc_red.dc_comp = (float)red_raw;
+        s_dc_ir.idx      = 0;
+        s_dc_red.idx     = 0;
+
+        /* Preload HP filter state so the AC signal starts at zero instead
+         * of a multi-second decay from ~raw_value (DF2T steady-state for
+         * a constant input with zero output: s1=-b0*x, s2=-(b0+b1)*x). */
         s_ir_hp.s1  = -s_ir_hp.b0  * (float)ir_raw;
+        s_ir_hp.s2  = -(s_ir_hp.b0  + s_ir_hp.b1)  * (float)ir_raw;
         s_red_hp.s1 = -s_red_hp.b0 * (float)red_raw;
+        s_red_hp.s2 = -(s_red_hp.b0 + s_red_hp.b1) * (float)red_raw;
         s_finger_on = true;
     }
 
-    /* 1. Raw DC (sliding mean) for the SpO2 R-ratio */
-    dc_remove(&s_dc_ir,  (float)ir_raw);
-    dc_remove(&s_dc_red, (float)red_raw);
+    /* 1. Raw DC (sliding mean) — only s_dc_ir/s_dc_red.dc_comp + warmup
+     * tracking are needed from this; the AC ring buffers below now use the
+     * filtered signal instead of raw - dc_comp. */
+    (void)dc_remove(&s_dc_ir,  (float)ir_raw);
+    (void)dc_remove(&s_dc_red, (float)red_raw);
+    rb_push(&s_ir_raw_rb,  (float)ir_raw);
+    rb_push(&s_red_raw_rb, (float)red_raw);
 
-    /* 2. DSP pipeline: HP → LP → ALE-NLMS → Savitzky-Golay */
+    /* 2. DSP pipeline: HP 1 Hz → LP 3 Hz (2nd-order biquads). The filtered
+     * output is used both for HR peak detection and as the AC component for
+     * SpO2 (peak-to-peak of this signal), since the fixed-coefficient HPF is
+     * far more stable than a sliding-mean DC removal near the HR band. */
     float ir = (float)ir_raw;
-    ir = iir1_step(&s_ir_hp, ir);
-    ir = iir1_step(&s_ir_lp, ir);
+    ir = biquad_step(&s_ir_hp, ir);
+    ir = biquad_step(&s_ir_lp, ir);
     //ir = ale_process(&s_ir_nlms, &s_ir_dly, ir);
-    ir = sg_step(&s_ir_sg, ir);
+    //ir = sg_step(&s_ir_sg, ir);
 
     float red = (float)red_raw;
-    red = iir1_step(&s_red_hp, red);
-    red = iir1_step(&s_red_lp, red);
+    red = biquad_step(&s_red_hp, red);
+    red = biquad_step(&s_red_lp, red);
     //red = ale_process(&s_red_nlms, &s_red_dly, red);
-    red = sg_step(&s_red_sg, red);
-		
+    //red = sg_step(&s_red_sg, red);
+
     rb_push(&s_ir_rb,  ir);
     rb_push(&s_red_rb, red);
+    rb_push(&s_ir_acdc_rb,  ir);
+    rb_push(&s_red_acdc_rb, red);
 		
 		
     /* 3. Peak detection on filtered IR + RR interval accumulation.
-     * 350 ms refractory period suppresses dicrotic notch (~250-350 ms after
+     * Adaptive amplitude envelope: track the running peak of |ir|, decaying
+     * slowly between beats, and only accept local maxima above 40% of it.
+     * Without this, find_peak() fires on any local max — small noise
+     * ripples and the dicrotic notch — inflating the peak count and HR. */
+    float ir_abs = fabsf(ir);
+    if (ir_abs > s_ir_env_peak)
+        s_ir_env_peak = ir_abs;
+    else
+        s_ir_env_peak *= PPG_PEAK_ENV_DECAY;
+
+    float peak_threshold = s_ir_env_peak * PPG_PEAK_THRESH_RATIO;
+
+    /* 350 ms refractory period suppresses dicrotic notch (~250-350 ms after
      * systolic peak), which would otherwise double the apparent HR. */
     uint8_t peak_accepted = 0;
-    if (find_peak(&s_ir_rb))
+    if (find_peak_thresh(&s_ir_rb, peak_threshold))
     {
         uint32_t now = timer2_now();
         uint32_t dt  = now - s_last_peak_time;
@@ -797,6 +923,11 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
             if (s_last_peak_time != 0 && dt > 0)
             {
                 rb_push(&s_dt_rb, (float)dt);
+                /* env_peak at acceptance time = confidence weight: a strong,
+                 * well-formed pulse produces a high envelope, so its RR
+                 * interval should count more than one detected on a weak
+                 * envelope (more likely noise/motion). */
+                rb_push(&s_dt_w_rb, s_ir_env_peak);
                 s_peak_count++;
             }
             s_last_peak_time = now;
@@ -804,8 +935,9 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
         }
     }
 
-    /* RT stream for ppg_rt_stream.py — one line per sample at 100 Hz */
-    //NRF_LOG_INFO("ppg:%d %d", (int)ir, (int)peak_accepted);
+    /* RT stream for ppg_rt_stream.py — one line per sample at 100 Hz.
+     * Format must match the parser: "ppg:<ir_raw> <ir_filt> <peak> <red_raw> <red_filt>". */
+   // NRF_LOG_INFO("ppg:%d %d %d %d %d", (int)ir_raw, (int)ir, (int)peak_accepted, (int)red_raw, (int)red);
 
     /* 4. Emit a result once per PPG_UPDATE_PERIOD samples */
     if (s_dc_warmup > 0) s_dc_warmup--;
@@ -814,59 +946,70 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
         return false;
     s_sample_ctr = 0;
 
-    float hr   = (float)hr_count(&s_dt_rb, s_peak_count);
+    float hr   = (float)hr_count(&s_dt_rb, &s_dt_w_rb, s_peak_count);
     /* Block SpO2 while DC window is still filling after a reset — dc_comp is
      * underestimated during warmup, which makes R wrong and SpO2 garbage. */
     float spo2 = (s_dc_warmup == 0)
-               ? (float)spo2_count(&s_dc_ir, &s_dc_red, &s_ir_rb, &s_red_rb)
+               ? (float)spo2_count(&s_ir_acdc_rb, &s_red_acdc_rb, &s_ir_raw_rb, &s_red_raw_rb)
                : 0.0f;
 
     NRF_LOG_INFO("PPG: hr=%d spo2=%d peaks=%d dc_ir=%d",
                  (int)hr, (int)spo2, (int)s_peak_count, (int)s_dc_ir.dc_comp);
 
-    if (hr < HR_MIN || hr > HR_MAX)         return false;
-    if (spo2 < SPO2_MIN || spo2 > SPO2_MAX) return false;
+    /* 5. HR and SpO2 are gated and smoothed independently — a window where
+     * one is out of range (e.g. SpO2 rejected by the R-range gate) must not
+     * freeze the other's output, since they're computed from independent
+     * pipelines. Each keeps its own last-good value (s_last_hr_out /
+     * s_last_spo2_out) when its own window is invalid. */
+    if (hr >= HR_MIN && hr <= HR_MAX)
+    {
+        /* 3-sample HR history smoothing (median — one bad second doesn't pull output) */
+        s_hr_hist[0] = s_hr_hist[1];
+        s_hr_hist[1] = s_hr_hist[2];
+        s_hr_hist[2] = hr;
 
-    /* 5. 3-sample HR history smoothing (median — one bad second doesn't pull output) */
-    s_hr_hist[0] = s_hr_hist[1];
-    s_hr_hist[1] = s_hr_hist[2];
-    s_hr_hist[2] = hr;
-
-    float a = s_hr_hist[0], b = s_hr_hist[1], c = s_hr_hist[2];
-    if (a == 0.0f || b == 0.0f)
-    {
-        /* fewer than 3 valid readings yet — use latest */
-        *hr_out = hr;
-    }
-    else
-    {
-        /* sort three values, pick middle */
-        float t;
-        if (a > b) { t = a; a = b; b = t; }
-        if (b > c) { t = b; b = c; c = t; }
-        if (a > b) { t = a; a = b; b = t; }
-        (void)a; (void)c;
-        *hr_out = b;
+        float a = s_hr_hist[0], b = s_hr_hist[1], c = s_hr_hist[2];
+        if (a == 0.0f || b == 0.0f)
+        {
+            /* fewer than 3 valid readings yet — use latest */
+            s_last_hr_out = hr;
+        }
+        else
+        {
+            /* sort three values, pick middle */
+            float t;
+            if (a > b) { t = a; a = b; b = t; }
+            if (b > c) { t = b; b = c; c = t; }
+            if (a > b) { t = a; a = b; b = t; }
+            (void)a; (void)c;
+            s_last_hr_out = b;
+        }
     }
 
-    /* 6. SpO2 3-sample median smoothing */
-    s_spo2_hist[0] = s_spo2_hist[1];
-    s_spo2_hist[1] = s_spo2_hist[2];
-    s_spo2_hist[2] = spo2;
-    float sa = s_spo2_hist[0], sb = s_spo2_hist[1], sc = s_spo2_hist[2];
-    if (sa == 0.0f || sb == 0.0f)
+    if (spo2 >= SPO2_MIN && spo2 <= SPO2_MAX)
     {
-        *spo2_out = spo2;
+        /* SpO2 3-sample median smoothing */
+        s_spo2_hist[0] = s_spo2_hist[1];
+        s_spo2_hist[1] = s_spo2_hist[2];
+        s_spo2_hist[2] = spo2;
+        float sa = s_spo2_hist[0], sb = s_spo2_hist[1], sc = s_spo2_hist[2];
+        if (sa == 0.0f || sb == 0.0f)
+        {
+            s_last_spo2_out = spo2;
+        }
+        else
+        {
+            float st;
+            if (sa > sb) { st = sa; sa = sb; sb = st; }
+            if (sb > sc) { st = sb; sb = sc; sc = st; }
+            if (sa > sb) { st = sa; sa = sb; sb = st; }
+            (void)sa; (void)sc;
+            s_last_spo2_out = sb;
+        }
     }
-    else
-    {
-        float st;
-        if (sa > sb) { st = sa; sa = sb; sb = st; }
-        if (sb > sc) { st = sb; sb = sc; sc = st; }
-        if (sa > sb) { st = sa; sa = sb; sb = st; }
-        (void)sa; (void)sc;
-        *spo2_out = sb;
-    }
+
+    *hr_out   = s_last_hr_out;
+    *spo2_out = s_last_spo2_out;
     return true;
 }
 
@@ -950,20 +1093,18 @@ float adenv_hr(const adenv_t *s)
 float adenv_spo2(dc_filter_t *dc_ir, dc_filter_t *dc_red,
                  rb_t *ir_rb, rb_t *red_rb)
 {
-    float ir_min = 1e9f,  ir_max  = -1e9f;
-    float red_min = 1e9f, red_max = -1e9f;
+    /* RMS amplitude — see comment in spo2_count(). */
+    float ir_sum_sq = 0.0f, red_sum_sq = 0.0f;
 
     for (int i = 0; i < RB_SIZE; i++) {
         float ir  = ir_rb->buff[i];
         float red = red_rb->buff[i];
-        if (ir  > ir_max)  ir_max  = ir;
-        if (ir  < ir_min)  ir_min  = ir;
-        if (red > red_max) red_max = red;
-        if (red < red_min) red_min = red;
+        ir_sum_sq  += ir  * ir;
+        red_sum_sq += red * red;
     }
 
-    float ir_ac  = ir_max  - ir_min;
-    float red_ac = red_max - red_min;
+    float ir_ac  = sqrtf(ir_sum_sq  / RB_SIZE);
+    float red_ac = sqrtf(red_sum_sq / RB_SIZE);
     float ir_dc  = dc_ir->dc_comp;
     float red_dc = dc_red->dc_comp;
 
@@ -971,6 +1112,12 @@ float adenv_spo2(dc_filter_t *dc_ir, dc_filter_t *dc_red,
         return 0.0f;
 
     float R    = (red_ac / red_dc) / (ir_ac / ir_dc);
+
+    /* Reject implausible R ratios (noisy/transient windows) instead of
+     * reporting a wildly wrong SpO2 value. */
+    if (R < 0.3f || R > 1.8f)
+        return 0.0f;
+
     float spo2 = 119.0f - 25.0f * R;
     if (spo2 > 100.0f) spo2 = 100.0f;
     if (spo2 <   0.0f) spo2 =   0.0f;

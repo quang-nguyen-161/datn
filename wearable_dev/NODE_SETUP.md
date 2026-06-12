@@ -92,7 +92,7 @@ The central's `conn_handle` identifies the target — **no node_id byte** is inc
 
 - `freq`: uint16 LE, ECG sample rate in Hz (default 250)
 - `int`: uint16 LE, packet interval in ms (default 200 → 50 samples/packet)
-- Applied on next sensor tick: `ecg_set_sample_us(1000000 / freq)` reconfigures TIMER3 CC0 live
+- Applied on next sensor tick: `adc_set_sample_us(1000000 / freq)` reconfigures TIMER3 CC0 live
 
 ### CMD_THR `0xCE` — Vital Alert Thresholds (31 bytes)
 
@@ -151,9 +151,9 @@ SAADC 12-bit, AIN0, GAIN1_6, 0.6V ref
 | Timer | Owner |
 |-------|-------|
 | TIMER0 | SoftDevice (reserved) |
-| TIMER1 | PWM |
-| TIMER2 | `timer2_now()` µs counter (max.c) |
-| TIMER3 | SAADC PPI — **do not reassign** |
+| TIMER1 | PWM (reserved; `pwm_init()` stub in peripheral.c) |
+| TIMER2 | `timer2_now()` µs counter (peripheral.c) |
+| TIMER3 | SAADC PPI (peripheral.c) — **do not reassign** |
 
 ---
 

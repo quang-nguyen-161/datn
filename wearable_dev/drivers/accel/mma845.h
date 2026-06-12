@@ -15,10 +15,7 @@
 #define NRF_GPIO_PIN_NOT_CONNECTED  0xFF
 #endif
 
-/* MMA8452Q INT1 pin — set to your schematic's INT1 GPIO. */
-#ifndef MMA8452Q_INT1_PIN
-#define MMA8452Q_INT1_PIN  27   /* P0.27 — change to match your schematic */
-#endif
+/* MMA8452Q INT1 pin — defined in the board pin map (main.h). */
 
 ///////////////////////////////////
 // MMA8452Q Register Definitions //

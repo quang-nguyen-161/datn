@@ -67,7 +67,7 @@ Runs in order every tick. Each peripheral is guarded by its presence flag — ab
 sensor tick
     │
     ├─[0] Apply pending gateway config commands
-    │       if g_cmd_cfg_pending:   ecg_set_sample_us(g_cmd_sample_us)
+    │       if g_cmd_cfg_pending:   adc_set_sample_us(g_cmd_sample_us)
     │       if g_ppg_cfg_pending:   max30102_set_sampling_rate()
     │                               max30102_set_led_current_1/2()
     │       if g_vital_cfg_pending: (clear flag — interval read live below)

@@ -23,7 +23,7 @@ from scipy import signal as sp
 # ============================================================
 #  CONFIG — edit these to pick the CSV file and time range
 # ============================================================
-CSV_FILE = "ecg_log3.csv"
+CSV_FILE = "ecg_log_cong.csv"
 T_START  = 18.0     # seconds
 T_END    = 28.0    # seconds  (set to None for full recording)
 

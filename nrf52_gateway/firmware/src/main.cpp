@@ -68,10 +68,12 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define PKT_TYPE_THR   0x04   // ESP32 → nRF central: thresholds 31 B [0xCE]...
 #define PKT_TYPE_PPG   0x05   // ESP32 → nRF central: PPG config  5 B [0xCD]...
 #define PKT_TYPE_VCF   0x06   // ESP32 → nRF central: vital cfg   3 B [0xCC]...
+#define PKT_TYPE_MODE  0x07   // ESP32 → nRF central: mode cfg    6 B [0xCB]...
 #define ECG_CFG_CMD    0xCF
 #define THR_CMD        0xCE
 #define PPG_CFG_CMD    0xCD
 #define VITAL_CFG_CMD  0xCC
+#define MODE_CFG_CMD   0xCB
 #define PKT_MAX_NAME   15
 #define PKT_MAX_DATA   256
 
@@ -81,6 +83,10 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define DEFAULT_PPG_RED_MA        6
 #define DEFAULT_PPG_IR_MA         6
 #define DEFAULT_VITAL_INTERVAL_MS 1000
+#define DEFAULT_DEVICE_MODE       0
+#define DEFAULT_PERIODIC_INTERVAL 10
+#define DEFAULT_CAPTURE_WINDOW    5
+#define DEFAULT_SHOW_ECG          1
 #define CONFIG_SYNC_MS            3000
 #define TB_KEY_FREQ               "ecgSampleFreq"
 #define TB_KEY_INTERVAL           "ecgPacketInterval"
@@ -88,6 +94,10 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define TB_KEY_PPG_RED_MA         "ppgRedLedMa"
 #define TB_KEY_PPG_IR_MA          "ppgIrLedMa"
 #define TB_KEY_VITAL_INTERVAL     "vitalInterval"
+#define TB_KEY_DEVICE_MODE        "deviceMode"
+#define TB_KEY_PERIODIC_INTERVAL  "periodicInterval"
+#define TB_KEY_CAPTURE_WINDOW     "captureWindow"
+#define TB_KEY_SHOW_ECG           "showEcg"
 
 // ── Threshold keys — 24 values matching gateway.py THRESHOLD_KEYS order ──────
 // [0..5]  ppgHr:  normalMin/Max, warnMin/Max, dangerMin/Max
@@ -132,6 +142,10 @@ static int    nodeLastPpgFreq[MAX_NODES];
 static int    nodeLastPpgRedMa[MAX_NODES];
 static int    nodeLastPpgIrMa[MAX_NODES];
 static int    nodeLastVitalInterval[MAX_NODES];
+static int    nodeLastMode[MAX_NODES];
+static int    nodeLastPeriodicInterval[MAX_NODES];
+static int    nodeLastCaptureWindow[MAX_NODES];
+static int    nodeLastShowEcg[MAX_NODES];
 
 // Per-node received vitals (updated by UART vital packets)
 static float nodeHr[MAX_NODES]    = {};
@@ -446,6 +460,10 @@ static void syncNodes() {
       nodeTokens[j]       = "";
       nodeLastFreq[j]     = 0;
       nodeLastInterval[j] = 0;
+      nodeLastMode[j]             = -1;
+      nodeLastPeriodicInterval[j] = -1;
+      nodeLastCaptureWindow[j]    = -1;
+      nodeLastShowEcg[j]          = -1;
       memset(nodeThrVals[j], 0, sizeof(nodeThrVals[j]));
     }
     nodeCount = newCount;
@@ -492,12 +510,15 @@ static bool resolveNodeToken(const String& name, String& tokenOut) {
 static bool fetchNodeConfig(const String& token,
     int& freq, int& interval,
     int& ppgFreq, int& ppgRedMa, int& ppgIrMa, int& vitalInterval,
+    int& deviceMode, int& periodicInterval, int& captureWindow, int& showEcg,
     int thr[THR_COUNT]) {
   adminClient.setInsecure();
   HTTPClient http;
   String keys = String(TB_KEY_FREQ) + "," + TB_KEY_INTERVAL
               + "," + TB_KEY_PPG_FREQ + "," + TB_KEY_PPG_RED_MA
-              + "," + TB_KEY_PPG_IR_MA + "," + TB_KEY_VITAL_INTERVAL;
+              + "," + TB_KEY_PPG_IR_MA + "," + TB_KEY_VITAL_INTERVAL
+              + "," + TB_KEY_DEVICE_MODE + "," + TB_KEY_PERIODIC_INTERVAL
+              + "," + TB_KEY_CAPTURE_WINDOW + "," + TB_KEY_SHOW_ECG;
   for (int i = 0; i < THR_COUNT; i++) { keys += ","; keys += THR_KEYS[i]; }
   http.begin(adminClient, tbUrl("/api/v1/" + token + "/attributes?sharedKeys=" + keys));
   int code = http.GET();
@@ -511,6 +532,10 @@ static bool fetchNodeConfig(const String& token,
   { int v = jsonInt(body, TB_KEY_PPG_RED_MA);      if (v > 0) ppgRedMa      = v; }
   { int v = jsonInt(body, TB_KEY_PPG_IR_MA);       if (v > 0) ppgIrMa       = v; }
   { int v = jsonInt(body, TB_KEY_VITAL_INTERVAL);  if (v > 0) vitalInterval  = v; }
+  { int v = jsonInt(body, TB_KEY_DEVICE_MODE,       -1); if (v >= 0) deviceMode       = v; }
+  { int v = jsonInt(body, TB_KEY_PERIODIC_INTERVAL, -1); if (v >  0) periodicInterval = v; }
+  { int v = jsonInt(body, TB_KEY_CAPTURE_WINDOW,    -1); if (v >  0) captureWindow    = v; }
+  { int v = jsonInt(body, TB_KEY_SHOW_ECG,          -1); if (v >= 0) showEcg          = v; }
 
   for (int i = 0; i < THR_COUNT; i++) {
     bool isTemp = (i >= 18);
@@ -605,6 +630,20 @@ static void sendUartVitalConfig(const String& name, int intervalMs) {
   Serial.printf("[VCF] -> %s: %d ms\n", name.c_str(), intervalMs);
 }
 
+// Build 7-byte mode config payload: [0xCB][mode][periodSecLo][periodSecHi][capSecLo][capSecHi][ecgEnabled]
+static void sendUartModeConfig(const String& name, int mode, int periodSec, int captureSec, int showEcg) {
+  uint8_t data[7] = {
+    MODE_CFG_CMD,
+    (uint8_t)constrain(mode, 0, 255),
+    (uint8_t)(periodSec & 0xFF),  (uint8_t)((periodSec >> 8) & 0xFF),
+    (uint8_t)(captureSec & 0xFF), (uint8_t)((captureSec >> 8) & 0xFF),
+    (uint8_t)(showEcg ? 1 : 0),
+  };
+  _sendUartFrame(PKT_TYPE_MODE, name, data, 7);
+  Serial.printf("[MOD] -> %s: mode=%d period=%ds capture=%ds ecg=%d\n",
+                name.c_str(), mode, periodSec, captureSec, showEcg ? 1 : 0);
+}
+
 // ── ECG config sync task — mirrors gateway.py ecg_attr_update_worker ─────────
 // Polls TB shared attributes every CONFIG_SYNC_MS; sends UART config on change.
 // Runs on Core 0 alongside nodeSyncTask (adminMutex prevents HTTPS conflicts).
@@ -637,6 +676,10 @@ static void configSyncTask(void*) {
       int ppgRedMa        = DEFAULT_PPG_RED_MA;
       int ppgIrMa         = DEFAULT_PPG_IR_MA;
       int vitalInterval   = DEFAULT_VITAL_INTERVAL_MS;
+      int deviceMode      = DEFAULT_DEVICE_MODE;
+      int periodicInterval = DEFAULT_PERIODIC_INTERVAL;
+      int captureWindow   = DEFAULT_CAPTURE_WINDOW;
+      int showEcg         = DEFAULT_SHOW_ECG;
       int thr[THR_COUNT];
       memcpy(thr, nodeThrVals[i], sizeof(thr));
 
@@ -644,6 +687,7 @@ static void configSyncTask(void*) {
              && fetchNodeConfig(nodeTokens[i],
                                 freq, interval,
                                 ppgFreq, ppgRedMa, ppgIrMa, vitalInterval,
+                                deviceMode, periodicInterval, captureWindow, showEcg,
                                 thr);
 
       xSemaphoreGive(adminMutex);
@@ -666,6 +710,15 @@ static void configSyncTask(void*) {
       if (vitalInterval != nodeLastVitalInterval[i]) {
         nodeLastVitalInterval[i] = vitalInterval;
         sendUartVitalConfig(names[i], vitalInterval);
+      }
+
+      if (deviceMode != nodeLastMode[i] || periodicInterval != nodeLastPeriodicInterval[i]
+          || captureWindow != nodeLastCaptureWindow[i] || showEcg != nodeLastShowEcg[i]) {
+        nodeLastMode[i]             = deviceMode;
+        nodeLastPeriodicInterval[i] = periodicInterval;
+        nodeLastCaptureWindow[i]    = captureWindow;
+        nodeLastShowEcg[i]          = showEcg;
+        sendUartModeConfig(names[i], deviceMode, periodicInterval, captureWindow, showEcg);
       }
 
       if (memcmp(thr, nodeThrVals[i], sizeof(thr)) != 0) {
@@ -896,6 +949,11 @@ void setup() {
   adminMutex = xSemaphoreCreateMutex();
   memset(nodeLastFreq,     0, sizeof(nodeLastFreq));
   memset(nodeLastInterval, 0, sizeof(nodeLastInterval));
+  // -1 (0xFF bytes) forces a first push even when the value equals 0 (e.g. mode 0)
+  memset(nodeLastMode,             0xFF, sizeof(nodeLastMode));
+  memset(nodeLastPeriodicInterval, 0xFF, sizeof(nodeLastPeriodicInterval));
+  memset(nodeLastCaptureWindow,    0xFF, sizeof(nodeLastCaptureWindow));
+  memset(nodeLastShowEcg,          0xFF, sizeof(nodeLastShowEcg));
   for (int i = 0; i < MAX_NODES; i++)
     memcpy(nodeThrVals[i], DEFAULT_THR, sizeof(DEFAULT_THR));
   xTaskCreatePinnedToCore(nodeSyncTask,   "nodeSync", 8192, NULL, 1, NULL, 0);

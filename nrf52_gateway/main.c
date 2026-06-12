@@ -63,10 +63,12 @@
 #define PKT_TYPE_THR        0x04   /* Threshold:   31 B [0xCE][18×u8 PPG/ECG/SpO2][6×u16LE temp×10] */
 #define PKT_TYPE_PPG        0x05   /* PPG config:   5 B [0xCD][fLo][fHi][redMa][irMa] */
 #define PKT_TYPE_VCF        0x06   /* Vital cfg:    3 B [0xCC][iLo][iHi] */
+#define PKT_TYPE_MODE       0x07   /* Mode cfg:     7 B [0xCB][mode][periodSec u16 LE][capSec u16 LE][ecgEnabled] */
 #define ECG_CFG_CMD         0xCF
 #define THR_CMD             0xCE
 #define PPG_CFG_CMD         0xCD
 #define VITAL_CFG_CMD       0xCC
+#define MODE_CFG_CMD        0xCB
 #define MAX_CMD_LEN         31     /* largest outbound payload = threshold   */
 #define UART_MAGIC_0        0xAA
 #define UART_MAGIC_1        0x55
@@ -190,6 +192,7 @@ static void uart_handle_pkt(void)
         case PKT_TYPE_THR: fwd = (s_dlen == 31 && s_data[0] == THR_CMD);       break;
         case PKT_TYPE_PPG: fwd = (s_dlen == 5  && s_data[0] == PPG_CFG_CMD);   break;
         case PKT_TYPE_VCF: fwd = (s_dlen == 3  && s_data[0] == VITAL_CFG_CMD); break;
+        case PKT_TYPE_MODE: fwd = (s_dlen == 7 && s_data[0] == MODE_CFG_CMD); break;
         default: break;
     }
     if (!fwd) {

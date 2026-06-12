@@ -1,34 +1,18 @@
 #include "ecg.h"
 #include "../dsp/filter.h"
-#include "main.h"    /* g_sensor */
+#include "main.h"          /* g_sensor */
+#include "peripheral.h"    /* adc_init(): SAADC + PPI + TIMER3 sampling chain */
 
-#include "app_error.h"
-#include "nrf_drv_ppi.h"
-#include "nrf_drv_saadc.h"
-#include "nrf_drv_timer.h"
+#include <string.h>        /* memcpy (RR-interval median buffer) */
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 
 /* ================================================================
  *  Shared result struct (filled by ecg_process, consumed in main loop)
- *  g_ecg_raw / g_ecg_ready are the ISR-side capture globals — defined
- *  and read out (saadc_callback) in main.c, declared extern in ecg.h.
+ *  The SAADC capture globals g_ecg_raw / g_ecg_ready and the whole
+ *  SAADC + PPI + TIMER3 sampling chain live in peripheral.c.
  * ================================================================ */
 ecg_result_t     g_ecg       = {0};
-
-/* Defined in main.c — registered with the SAADC driver below. */
-extern void saadc_callback(nrf_drv_saadc_evt_t const *p_event);
-
-/* ================================================================
- *  Hardware resources
- *  TIMER3: dedicated to SAADC PPI (TIMER0=SD, TIMER1=PWM, TIMER2=µs counter)
- * ================================================================ */
-#define SAADC_SAMPLE_US  4000       /* 250 Hz */
-#define SAMPLES_IN_BUFFER 1
-
-static const nrf_drv_timer_t m_saadc_timer = NRF_DRV_TIMER_INSTANCE(3);
-static nrf_saadc_value_t     m_buf[2][SAMPLES_IN_BUFFER];
-static nrf_ppi_channel_t     m_ppi_chan;
 
 /* ================================================================
  *  ECG filter states (private to this module)
@@ -43,67 +27,6 @@ static biquad_df2t_t  s_lpf1_ecg, s_lpf2_ecg;     /* 2× 2nd-order LP at 25 Hz *
 static nlms_t         s_nlms;
 static delay_t        s_ale_delay;
 static sg_filter_t    s_sg;
-
-/* ================================================================
- *  SAADC init — 12-bit, AIN0, GAIN1_6, internal 0.6 V ref
- *  AD8232 output 0.5–2.5 V fits inside 3.6 V full-scale range
- * ================================================================ */
-static void saadc_init(void)
-{
-    nrf_saadc_channel_config_t ch = NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN0);
-    ch.gain      = NRF_SAADC_GAIN1_6;
-    ch.reference = NRF_SAADC_REFERENCE_INTERNAL;
-    ch.acq_time  = NRF_SAADC_ACQTIME_20US;
-    ch.mode      = NRF_SAADC_MODE_SINGLE_ENDED;
-    ch.burst     = NRF_SAADC_BURST_DISABLED;
-
-    nrf_drv_saadc_config_t cfg = NRF_DRV_SAADC_DEFAULT_CONFIG;
-    cfg.resolution = NRF_SAADC_RESOLUTION_12BIT;
-    cfg.oversample = NRF_SAADC_OVERSAMPLE_DISABLED;
-
-    ret_code_t err;
-    err = nrf_drv_saadc_init(&cfg, saadc_callback);      APP_ERROR_CHECK(err);
-    err = nrf_drv_saadc_channel_init(0, &ch);             APP_ERROR_CHECK(err);
-    err = nrf_drv_saadc_buffer_convert(m_buf[0], SAMPLES_IN_BUFFER); APP_ERROR_CHECK(err);
-    err = nrf_drv_saadc_buffer_convert(m_buf[1], SAMPLES_IN_BUFFER); APP_ERROR_CHECK(err);
-    nrf_drv_saadc_calibrate_offset();
-}
-
-/* ================================================================
- *  PPI init — TIMER3 compare → SAADC sample task at 250 Hz
- * ================================================================ */
-static void timer_handler(nrf_timer_event_t event_type, void *p_context)
-{
-    (void)event_type; (void)p_context;
-}
-
-static void ppi_init(void)
-{
-    ret_code_t err;
-
-    err = nrf_drv_ppi_init();
-    APP_ERROR_CHECK(err);
-
-    nrf_drv_timer_config_t tcfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
-    tcfg.bit_width = NRF_TIMER_BIT_WIDTH_32;
-    err = nrf_drv_timer_init(&m_saadc_timer, &tcfg, timer_handler);
-    APP_ERROR_CHECK(err);
-
-    uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, SAADC_SAMPLE_US);
-    nrf_drv_timer_extended_compare(&m_saadc_timer,
-                                   NRF_TIMER_CC_CHANNEL0,
-                                   ticks,
-                                   NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
-                                   false);
-    nrf_drv_timer_enable(&m_saadc_timer);
-
-    uint32_t timer_evt  = nrf_drv_timer_compare_event_address_get(&m_saadc_timer, NRF_TIMER_CC_CHANNEL0);
-    uint32_t saadc_task = nrf_drv_saadc_sample_task_get();
-
-    err = nrf_drv_ppi_channel_alloc(&m_ppi_chan);     APP_ERROR_CHECK(err);
-    err = nrf_drv_ppi_channel_assign(m_ppi_chan, timer_evt, saadc_task); APP_ERROR_CHECK(err);
-    err = nrf_drv_ppi_channel_enable(m_ppi_chan);     APP_ERROR_CHECK(err);
-}
 
 /* ================================================================
  *  Public API
@@ -124,9 +47,8 @@ void ecg_init(void)
     delay_init(&s_ale_delay);
     sg_init(&s_sg);
 
-    saadc_init();
-    ppi_init();
-    NRF_LOG_INFO("ECG: 250 Hz PPI sampling");
+    adc_init();    /* SAADC + PPI + TIMER3 — 250 Hz autonomous sampling */
+    NRF_LOG_INFO("ECG: filters ready");
     NRF_LOG_FLUSH();
 }
 
@@ -234,16 +156,6 @@ static uint8_t rpeak_detect_v2(float val)
     return 0;
 }
 
-void ecg_set_sample_us(uint32_t us)
-{
-    uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, us);
-    nrf_drv_timer_extended_compare(&m_saadc_timer,
-                                   NRF_TIMER_CC_CHANNEL0,
-                                   ticks,
-                                   NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
-                                   false);
-}
-
 float ecg_process(int16_t raw)
 {
     float x = (float)raw;
@@ -266,7 +178,7 @@ float ecg_process(int16_t raw)
 
     /* R-peak v1: Pan-Tompkins adaptive threshold */
     uint8_t bpm = rpeak_detect(x);
-    if (bpm > 0) g_sensor.hr_ecg = bpm;
+    if (bpm > 0) { g_sensor.hr_ecg = bpm; g_sensor.hr_ecg_valid = true; }
 
     g_ecg.raw      = raw;
     g_ecg.filtered = x;

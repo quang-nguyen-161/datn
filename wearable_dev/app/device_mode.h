@@ -16,15 +16,21 @@ typedef enum {
 
 /* ── Current state ── */
 extern device_mode_t g_device_mode;
-extern uint16_t      g_period_ms;   /* effective period for MODE_PERIODIC (seconds) */
+extern uint16_t      g_period_ms;    /* MODE_PERIODIC wake-to-wake interval (ms), 5000–60000 */
+extern uint16_t      g_capture_ms;   /* MODE_PERIODIC measurement window (ms), ≥5000 ≤period  */
 
 /* ── Sensor-tick flag — set by app_timer, consumed in main loop ── */
 extern volatile bool g_sensor_tick;
 
+/* ── PERIODIC: set true at end of each capture window — tells main loop to
+ *    emit one averaged vital packet for this cycle. Consumed in main loop. ── */
+extern volatile bool g_periodic_send_due;
+
 /* ── API ── */
 void     device_mode_init(void);                    /* call once, reads FDS */
 void     device_mode_set(device_mode_t mode);       /* switches mode, saves to FDS */
-void     device_mode_set_period(uint16_t seconds);  /* sets periodic interval, saves */
+void     device_mode_set_period(uint16_t seconds);  /* periodic interval (5–60 s), saves */
+void     device_mode_set_capture(uint16_t seconds); /* periodic capture window (≥5 s), saves */
 uint16_t device_mode_get_period(void);
 
 /* ── BLE RX command protocol (called from cus_service RX handler) ──

@@ -14,13 +14,11 @@ typedef struct {
 
 extern ecg_result_t g_ecg;
 
-/* ── Legacy ISR globals (still needed by ISR) ── */
-extern volatile int16_t g_ecg_raw;
-extern volatile bool    g_ecg_ready;
+/* The SAADC capture globals (g_ecg_raw / g_ecg_ready) and live sample-rate
+ * control (adc_set_sample_us) now live in peripheral.h / peripheral.c. */
 
 /* ── Init ── */
 void ecg_init(void);
-void ecg_set_sample_us(uint32_t us); /* live-reconfigure TIMER3 compare rate (e.g. 4000 = 250 Hz) */
 
 /* ── Signal processing ── */
 float ecg_process(int16_t raw);   /* bandpass(1–25 Hz) → ALE-NLMS → Savitzky-Golay; returns filtered sample */
