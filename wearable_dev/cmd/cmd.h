@@ -17,6 +17,7 @@ extern "C" {
 #define CMD_PPG_CFG   0xCD  /* [CMD][freqLo][freqHi][redMa][irMa]                   5 B  */
 #define CMD_VITAL_CFG 0xCC  /* [CMD][intervalLo][intervalHi]                         3 B  */
 #define CMD_MODE_CFG  0xCB  /* [CMD][mode][periodSecLo][periodSecHi][capSecLo][capSecHi][ecgEnabled]  7 B  */
+#define CMD_NAME_CFG  0xC9  /* [CMD][len][name bytes...]                                     2-17 B  */
 
 /* -----------------------------------------------------------------------
  * ECG reconfiguration  (CMD_ECG_CFG)
@@ -45,6 +46,21 @@ extern volatile uint16_t g_vital_interval_ms; /* ms  — default 1000 */
  *   false → process ECG (HR / LCD) but send no ECG batches
  * ----------------------------------------------------------------------- */
 extern volatile bool     g_ecg_stream_enabled; /* default true */
+
+/* -----------------------------------------------------------------------
+ * Patient name  (CMD_NAME_CFG) — shown on the LCD BLE status row (line 2)
+ * in place of the device's BLE address while connected.
+ * ----------------------------------------------------------------------- */
+extern volatile char     g_patient_name[16]; /* "" = not set, show address */
+
+/* -----------------------------------------------------------------------
+ * Config-update splash notification — set by cmd_rx_handle() whenever any
+ * CMD_* config command is applied; consumed by main.c to show a brief
+ * full-screen "Updated" splash on the LCD (dashboard_show_update_splash()).
+ * ----------------------------------------------------------------------- */
+extern volatile bool    g_cmd_update_pending;
+extern volatile char    g_cmd_update_msg[20];  /* title, e.g. "ECG Config"   */
+extern volatile char    g_cmd_update_val[24];  /* detail, e.g. "250Hz 200ms" */
 
 /* -----------------------------------------------------------------------
  * Vital thresholds — 3 tiers per vital sign.

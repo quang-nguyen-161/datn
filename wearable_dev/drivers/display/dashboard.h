@@ -5,13 +5,13 @@
 #include <stdbool.h>
 
 /**
- * Dashboard — GC9A01 240x240 display module (Layout V2)
+ * Dashboard — GC9A01 240x240 display module (Layout V3)
  *
  * Layout:
- *   Row 1: BLE Status (device name/MAC + RSSI + signal bars)
+ *   Row 1: BLE Status (device name/MAC + RSSI + signal bars) + battery icon
  *   Row 2: Temperature (left) + SpO2 (right)
- *   Row 3: ECG waveform (left 55%) + HR number & sweep (right 45%)
- *   Row 4: Steps + Activity + Distance + Progress
+ *   Row 3: Steps + Activity (left) + HR number & sweep (right)
+ *   Row 4: ECG waveform (full width) + ON/OFF availability badge
  */
 
 /* ── Sensor data struct for display ── */
@@ -26,10 +26,18 @@ typedef struct {
     uint32_t timestamp_ms;
 
     /* BLE status — Row 1 */
-    char     device_name[16];   /* Tên từ gateway, hoặc "" nếu chưa có  */
-    uint8_t  mac[6];            /* MAC address (fallback khi chưa có tên) */
+    char     device_name[16];   /* Patient name from gateway (CMD_NAME_CFG); shown on
+                                  * line 2 when ble_connected, else "" => show mac */
+    uint8_t  mac[6];            /* BLE address (line 2 fallback when no patient name) */
     int8_t   rssi;              /* RSSI dBm (-30 đến -100), 0=disconnected */
     bool     ble_connected;     /* true khi đã kết nối gateway */
+
+    /* Battery — Row 1 (placeholder until ADC battery reading is wired up) */
+    bool     battery_valid;     /* true once a real reading exists */
+    uint8_t  battery_pct;       /* 0-100, only meaningful when battery_valid */
+
+    /* ECG stream enable/disable — Row 4 badge + sweep gating */
+    bool     ecg_enabled;       /* mirrors g_ecg_stream_enabled */
 } dashboard_data_t;
 
 /* ── API ── */
@@ -40,6 +48,9 @@ void dashboard_splash(void);
 /** Draw static dashboard layout */
 void dashboard_init_layout(void);
 
+/** Full-screen "config updated" splash with bold centered title + value, ~1s (blocking) */
+void dashboard_show_update_splash(const char *title, const char *val);
+
 /** Update BLE status bar: device name/MAC + RSSI + signal icon */
 void dashboard_update_ble_status(const dashboard_data_t *d);
 
@@ -49,10 +60,13 @@ void dashboard_update_hr(const dashboard_data_t *d);
 /** Update temperature display (number + sweep chart) */
 void dashboard_update_temp(const dashboard_data_t *d);
 
-/** Update ECG sweep line (Row 3 left, call at ~8 FPS) */
+/** Update ECG ON/OFF badge + sweep line (Row 4, call at ~8 FPS) */
 void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val);
 
-/** Update steps + activity + distance + progress bar */
+/** Update steps + activity (Row 3 left, compact) */
 void dashboard_update_steps(const dashboard_data_t *d, float ac_value);
+
+/** Update battery icon (Row 1, outline placeholder until battery_valid) */
+void dashboard_update_battery(const dashboard_data_t *d);
 
 #endif /* DASHBOARD_H__ */

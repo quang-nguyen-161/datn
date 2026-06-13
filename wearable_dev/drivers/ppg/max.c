@@ -301,19 +301,26 @@ void max30102_set_sampling_rate(max30102_sr_t sr)
     uint8_t config;
     ppg_read(SPO2_CONFIG_REGISTER, &config, 1);
     config = (config & ~(0x07 << SPO2_SR_SHIFT)) | (sr << SPO2_SR_SHIFT);
-    ppg_write(SPO2_CONFIG_REGISTER, config);
+    bool ok = ppg_write(SPO2_CONFIG_REGISTER, config);
+    NRF_LOG_INFO("PPG sample rate = SR%u (SPO2_CONFIG=0x%02X) %s", (unsigned)sr, config, ok ? "OK" : "FAIL");
 }
 
 void max30102_set_led_current_1(float ma)
 {
+    /* LED1 current setting is physically wired to the LED2 current register
+     * on this PCB (RED/IR current registers are swapped vs. read_fifo's LED1/LED2). */
     uint8_t pa = ma / 0.2;
-    ppg_write(LED_CURRENT_REGISTER_1, pa);
+    bool ok = ppg_write(LED_CURRENT_REGISTER_2, pa);
+    NRF_LOG_INFO("PPG LED1 current = %u mA (PA=0x%02X) %s", (unsigned)ma, pa, ok ? "OK" : "FAIL");
 }
 
 void max30102_set_led_current_2(float ma)
 {
+    /* LED2 current setting is physically wired to the LED1 current register
+     * on this PCB (RED/IR current registers are swapped vs. read_fifo's LED1/LED2). */
     uint8_t pa = ma / 0.2;
-    ppg_write(LED_CURRENT_REGISTER_2, pa);
+    bool ok = ppg_write(LED_CURRENT_REGISTER_1, pa);
+    NRF_LOG_INFO("PPG LED2 current = %u mA (PA=0x%02X) %s", (unsigned)ma, pa, ok ? "OK" : "FAIL");
 }
 
 void max30102_set_mode(max30102_mode_t mode)

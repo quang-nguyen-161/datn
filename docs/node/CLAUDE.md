@@ -105,14 +105,6 @@ Pending flags are checked at the start of every sensor tick and applied immediat
 | CMD_VITAL_CFG | 0xCC | 3 | `g_vital_cfg_pending` | vital BLE tick counter uses `g_vital_interval_ms / 10` directly |
 | CMD_NAME_CFG | 0xC9 | 2-17 | — | `g_patient_name` updated immediately; shown on LCD Row 1 line 2 when connected |
 
-Every successful command above also calls `notify_update(title, val)`, setting
-`g_cmd_update_pending` + `g_cmd_update_msg` (title, e.g. "ECG Config") + `g_cmd_update_val`
-(the actual new value(s), e.g. "250Hz 200ms", "PPG ECG SpO2 Temp" for CMD_THR — only the
-threshold groups that actually changed, "Continuous ECG:On" for CMD_MODE_CFG, the name itself
-for CMD_NAME_CFG). The main loop sensor tick checks this flag and, if an LCD is present, shows
-a ~1s full-screen bold splash (title + value, `dashboard_show_update_splash()`) before
-restoring the normal layout (`dashboard_init_layout()`).
-
 **Wire flow in main.c sensor tick:**
 ```c
 if (g_cmd_cfg_pending)      { g_cmd_cfg_pending = false;  adc_set_sample_us(g_cmd_sample_us); }

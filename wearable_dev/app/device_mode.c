@@ -144,6 +144,7 @@ void device_mode_set_period(uint16_t seconds)
     if (g_capture_ms > g_period_ms) { g_capture_ms = g_period_ms; }
     periodic_recompute();
     flash_user_mark_dirty();
+    NRF_LOG_INFO("device_mode_set_period: period=%u ms, capture=%u ms", g_period_ms, g_capture_ms);
 }
 
 void device_mode_set_capture(uint16_t seconds)
@@ -154,6 +155,7 @@ void device_mode_set_capture(uint16_t seconds)
     g_capture_ms = (uint16_t)((uint32_t)seconds * 1000);
     periodic_recompute();
     flash_user_mark_dirty();
+    NRF_LOG_INFO("device_mode_set_capture: capture=%u ms", g_capture_ms);
 }
 
 uint16_t device_mode_get_period(void)

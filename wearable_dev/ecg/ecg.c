@@ -2,6 +2,7 @@
 #include "../dsp/filter.h"
 #include "main.h"          /* g_sensor */
 #include "peripheral.h"    /* adc_init(): SAADC + PPI + TIMER3 sampling chain */
+#include "cmd.h"           /* g_ecg_stream_enabled */
 
 #include <string.h>        /* memcpy (RR-interval median buffer) */
 #include "nrf_log.h"
@@ -178,7 +179,11 @@ float ecg_process(int16_t raw)
 
     /* R-peak v1: Pan-Tompkins adaptive threshold */
     uint8_t bpm = rpeak_detect(x);
-    if (bpm > 0) { g_sensor.hr_ecg = bpm; g_sensor.hr_ecg_valid = true; }
+    if (g_ecg_stream_enabled) {
+        if (bpm > 0) { g_sensor.hr_ecg = bpm; g_sensor.hr_ecg_valid = true; }
+    } else {
+        g_sensor.hr_ecg_valid = false;
+    }
 
     g_ecg.raw      = raw;
     g_ecg.filtered = x;

@@ -1839,6 +1839,11 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\..\modules\nrfx\drivers\src\nrfx_saadc.c</FilePath>
             </File>
+            <File>
+              <FileName>nrfx_pwm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\..\modules\nrfx\drivers\src\nrfx_pwm.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -5742,6 +5747,11 @@
               <FileName>nrfx_saadc.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\..\modules\nrfx\drivers\src\nrfx_saadc.c</FilePath>
+            </File>
+            <File>
+              <FileName>nrfx_pwm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\..\modules\nrfx\drivers\src\nrfx_pwm.c</FilePath>
             </File>
           </Files>
         </Group>

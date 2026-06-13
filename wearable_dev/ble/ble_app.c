@@ -49,6 +49,7 @@ BLE_ADVERTISING_DEF(m_advertising);
 static uint16_t   m_conn_handle        = BLE_CONN_HANDLE_INVALID;
 static uint16_t   m_ble_max_data_len   = BLE_GATT_ATT_MTU_DEFAULT - 3;
 static volatile bool m_mtu_negotiated  = false;  /* set once ATT MTU exchange completes */
+static volatile int8_t m_rssi          = 0;      /* latest RSSI, updated via BLE_GAP_EVT_RSSI_CHANGED */
 static ble_uuid_t m_adv_uuids[]        = { {CUS_SERVICE_UUID, NUS_SERVICE_UUID_TYPE} };
 
 /* ---------- GAP ---------- */
@@ -133,14 +134,21 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             NRF_LOG_INFO("Connected");
             m_conn_handle    = p_ble_evt->evt.gap_evt.conn_handle;
             m_mtu_negotiated = false;
+            m_rssi           = 0;
             sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_CONN,
                                     p_ble_evt->evt.gap_evt.conn_handle, 0);
             nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
+            sd_ble_gap_rssi_start(m_conn_handle, 0, 0);
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
             NRF_LOG_INFO("Disconnected");
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            m_rssi        = 0;
+            break;
+
+        case BLE_GAP_EVT_RSSI_CHANGED:
+            m_rssi = p_ble_evt->evt.gap_evt.params.rssi_changed.rssi;
             break;
 
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {
@@ -234,6 +242,15 @@ void advertising_start(void)
 uint16_t ble_app_conn_handle(void)  { return m_conn_handle; }
 bool     ble_app_is_connected(void) { return m_conn_handle != BLE_CONN_HANDLE_INVALID; }
 bool     ble_app_ready_to_send(void) { return ble_app_is_connected() && m_mtu_negotiated; }
+
+void ble_app_get_addr(uint8_t addr[6])
+{
+    ble_gap_addr_t gap_addr;
+    sd_ble_gap_addr_get(&gap_addr);
+    memcpy(addr, gap_addr.addr, 6);
+}
+
+int8_t ble_app_get_rssi(void) { return (int8_t)m_rssi; }
 
 void ble_app_set_conn_interval(uint16_t min_ms, uint16_t max_ms)
 {

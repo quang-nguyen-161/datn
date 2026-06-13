@@ -99,6 +99,9 @@ static bool s_tmp_present   = false;
 static bool     s_tmp_triggered  = false;
 static uint32_t s_tmp_trigger_ms = 0;
 
+/* True once max30102_shutdown() has been called for LED1=LED2=0 mA (CMD_PPG_CFG) */
+static bool     s_ppg_shutdown   = false;
+
 #define DEAD_BEEF                   0xDEADBEEF
 
 /* ECG reconfiguration pending — written by cmd_rx_handle(), consumed here */
@@ -192,6 +195,8 @@ int main(void)
     s_lcd_present = lcd_spi_init();
     if (s_lcd_present) {
         GC9A01_init();
+        pwm_init();              /* LCD backlight PWM → full brightness */
+				lcd_set_brightness(100);
         dashboard_splash();
         nrf_delay_ms(2000);
         dashboard_init_layout();
@@ -230,22 +235,61 @@ int main(void)
             if (g_cmd_cfg_pending)
             {
                 g_cmd_cfg_pending = false;
+                NRF_LOG_INFO("ECG cfg apply: sample_us=%u, pkt_samples=%u",
+                             (unsigned)g_cmd_sample_us, (unsigned)g_cmd_pkt_samples);
                 adc_set_sample_us(g_cmd_sample_us);
             }
             if (g_ppg_cfg_pending && s_ppg_present)
             {
                 g_ppg_cfg_pending = false;
-                max30102_set_sampling_rate(ppg_hz_to_sr(g_ppg_sample_freq));
-                /* LED1 is physically the IR LED on this PCB (see
-                 * max30102_read_1_sample channel swap), so map currents
-                 * to match the physical wiring. */
-                max30102_set_led_current_1((float)g_ppg_ir_ma);
-                max30102_set_led_current_2((float)g_ppg_red_ma);
-                max30102_reset_filters();
+                NRF_LOG_INFO("PPG cfg apply: %u Hz, LED1(IR)=%u mA, LED2(red)=%u mA",
+                             (unsigned)g_ppg_sample_freq, (unsigned)g_ppg_ir_ma, (unsigned)g_ppg_red_ma);
+
+                if (g_ppg_ir_ma == 0 && g_ppg_red_ma == 0)
+                {
+                    /* Both LEDs off — power down the sensor entirely instead of
+                     * just zeroing the LED current registers. */
+                    if (!s_ppg_shutdown)
+                    {
+                        max30102_shutdown();
+                        s_ppg_shutdown = true;
+                        NRF_LOG_INFO("PPG: shut down (LED1=LED2=0 mA)");
+                    }
+                }
+                else
+                {
+                    if (s_ppg_shutdown)
+                    {
+                        max30102_wakeup();
+                        s_ppg_shutdown = false;
+                        NRF_LOG_INFO("PPG: woke up");
+                    }
+                    max30102_set_sampling_rate(ppg_hz_to_sr(g_ppg_sample_freq));
+                    /* LED1 is physically the IR LED on this PCB (see
+                     * max30102_read_1_sample channel swap), so map currents
+                     * to match the physical wiring. */
+                    max30102_set_led_current_1((float)g_ppg_ir_ma);
+                    max30102_set_led_current_2((float)g_ppg_red_ma);
+                    max30102_reset_filters();
+                }
             }
             if (g_vital_cfg_pending)
             {
                 g_vital_cfg_pending = false;
+                NRF_LOG_INFO("Vital cfg apply: interval=%u ms", (unsigned)g_vital_interval_ms);
+            }
+            if (g_cmd_update_pending)
+            {
+                g_cmd_update_pending = false;
+                if (s_lcd_present) {
+                    char title[20], val[24];
+                    strncpy(title, (const char *)g_cmd_update_msg, sizeof(title) - 1);
+                    title[sizeof(title) - 1] = '\0';
+                    strncpy(val, (const char *)g_cmd_update_val, sizeof(val) - 1);
+                    val[sizeof(val) - 1] = '\0';
+                    dashboard_show_update_splash(title, val);
+                    dashboard_init_layout();
+                }
             }
 
             /* MAX30102: read one sample, process incrementally */
@@ -262,6 +306,7 @@ int main(void)
                     g_sensor.spo2_valid   = true;
                     s_dash.hr       = hr;
                     s_dash.spo2     = spo2;
+                    s_dash.hr_valid = true;   /* gates HR + SpO2 draw in dashboard_update_hr */
                     if (s_lcd_present) dashboard_update_hr(&s_dash);
 
                     if (g_device_mode == MODE_PERIODIC)
@@ -287,6 +332,7 @@ int main(void)
             }
 							
             if (s_lcd_present) {
+                s_dash.ecg_enabled = g_ecg_stream_enabled;   /* V3: ECG ON/OFF badge + sweep gating */
                 dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
                 dashboard_update_ecg(&s_dash, s_ecg_display);
             }
@@ -331,7 +377,7 @@ int main(void)
             if (g_device_mode == MODE_PERIODIC)
             {
                 /* Snapshot ECG HR each capture tick (this block only runs while capturing) */
-                if (g_sensor.hr_ecg_valid)
+                if (g_ecg_stream_enabled && g_sensor.hr_ecg_valid)
                 {
                     s_acc_hr_ecg += g_sensor.hr_ecg;
                     s_acc_n_ecg++;
@@ -406,11 +452,56 @@ int main(void)
                 }
             }
         }
-				
+
+        /* ── LCD vitals refresh — push latest HR / SpO2 / Temp at the same
+         *    cadence as the BLE vitals send (g_vital_interval_ms, default
+         *    1000 ms, configurable via CMD_VITAL_CFG), independent of when
+         *    individual sensor readings arrive. Shows "--" for any vital
+         *    with no valid reading. ── */
+        if (s_lcd_present)
+        {
+            static uint32_t s_lcd_vitals_ms = 0;
+            if (now_ms - s_lcd_vitals_ms >= g_vital_interval_ms)
+            {
+                s_lcd_vitals_ms = now_ms;
+
+                s_dash.hr          = g_sensor.hr_ppg;
+                s_dash.spo2        = g_sensor.spo2;
+                s_dash.hr_valid    = g_sensor.hr_ppg_valid;   /* gates HR + SpO2 draw */
+                s_dash.temperature = g_sensor.temp;
+                s_dash.temp_valid  = g_sensor.temp_valid;
+
+                dashboard_update_hr(&s_dash);
+                dashboard_update_temp(&s_dash);
+
+                /* ── Row 1: BLE status (address/patient name, RSSI, signal bars) ── */
+                s_dash.ble_connected = ble_app_is_connected();
+                s_dash.rssi          = s_dash.ble_connected ? ble_app_get_rssi() : 0;
+                ble_app_get_addr(s_dash.mac);
+                if (s_dash.ble_connected && g_patient_name[0] != '\0') {
+                    strncpy(s_dash.device_name, (const char *)g_patient_name,
+                            sizeof(s_dash.device_name) - 1);
+                    s_dash.device_name[sizeof(s_dash.device_name) - 1] = '\0';
+                } else {
+                    s_dash.device_name[0] = '\0';   /* show address */
+                }
+                dashboard_update_ble_status(&s_dash);
+            }
+        }
+
         /* ── ECG sample ready (250 Hz, set by SAADC ISR) ── */
         if (ENABLE_ECG && g_ecg_ready)
         {
             g_ecg_ready = false;
+
+            if (g_ecg_raw < 1000)
+            {
+                /* Electrode likely disconnected — ADC reading too low to be a
+                 * valid ECG sample. Skip HR calc, sweep update, and buffering. */
+                g_sensor.hr_ecg_valid = false;
+            }
+            else
+            {
             float filtered = ecg_process(g_ecg_raw);
 
             /* Scale to 0–999 for LCD waveform */
@@ -448,6 +539,7 @@ int main(void)
 #else
                 (void)total;
 #endif
+            }
             }
         }
 

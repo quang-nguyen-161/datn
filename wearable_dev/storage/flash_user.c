@@ -349,7 +349,22 @@ ret_code_t m_record_update(uint32_t fid, uint32_t key, uint8_t * data, uint32_t 
     }
     else
     {
-        NRF_LOG_WARNING("m_record_update: record not found (0x%08X)", rc);
+        /* Record vanished (e.g. deleted after a corrupted-record reset that
+         * never recreated it) — create it now so future updates succeed. */
+        NRF_LOG_WARNING("m_record_update: record not found (0x%08X), creating it.", rc);
+        rc = fds_record_write(NULL, &record);
+        if (rc == FDS_ERR_NO_SPACE_IN_FLASH)
+        {
+            NRF_LOG_INFO("No space in flash, delete some records to update the config file.");
+        }
+        else if (rc != NRF_SUCCESS)
+        {
+            APP_ERROR_CHECK(rc);
+        }
+        else
+        {
+            NRF_LOG_INFO("record created");
+        }
     }
     return rc;
 }

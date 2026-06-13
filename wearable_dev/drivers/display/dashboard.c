@@ -10,6 +10,7 @@
 
 #include "dashboard.h"
 #include "gc9a01.h"
+#include "nrf_delay.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -38,13 +39,7 @@ typedef enum {
     ACT_REST, ACT_MOVING, ACT_WALK, ACT_FAST_WALK, ACT_RUN
 } activity_t;
 
-#define STRIDE_LENGTH_M  0.65f
-#define KCAL_WALK        0.04f
-#define KCAL_RUN         0.07f
-
 static activity_t s_activity = ACT_REST;
-static float    s_distance_m = 0;
-static float    s_calories   = 0;
 static uint32_t s_prev_steps = 0;
 
 static const char* act_name(activity_t a) {
@@ -175,6 +170,27 @@ static void draw_signal_bars(int16_t x, int16_t y, uint8_t bars, uint16_t color)
     }
 }
 
+/**
+ * Draw battery icon — Row 1, right of signal bars.
+ * Outline + nub always drawn; interior fill only when battery_valid.
+ */
+static void draw_battery_icon(const dashboard_data_t *d)
+{
+    GC9A01_fill_rect(151, 14, 16, 9, DARK_BG);  /* clear icon + nub area */
+    GC9A01_draw_line(LIGHT_GRAY, 151, 14, 165, 14);
+    GC9A01_draw_line(LIGHT_GRAY, 151, 22, 165, 22);
+    GC9A01_draw_line(LIGHT_GRAY, 151, 14, 151, 22);
+    GC9A01_draw_line(LIGHT_GRAY, 165, 14, 165, 22);
+    GC9A01_fill_rect(165, 16, 2, 4, LIGHT_GRAY);
+    if (d->battery_valid) {
+        uint8_t pct = d->battery_pct > 100 ? 100 : d->battery_pct;
+        uint16_t fc = (pct < 20) ? SOFT_RED : (pct < 50) ? YELLOW : SOFT_GREEN;
+        int16_t fw = (int16_t)((pct * 13) / 100);
+        if (fw > 0) GC9A01_fill_rect(152, 15, fw, 7, fc);
+    }
+    /* else: interior stays cleared → outline-only placeholder */
+}
+
 /* ================================================================
  *  COLOR LOGIC
  * ================================================================ */
@@ -286,6 +302,11 @@ static int8_t   last_rssi=1;          /* Invalid initial → forces first draw *
 static bool     last_ble_conn=false;
 static char     last_device_name[16] = "";
 
+/* V3: ECG ON/OFF badge + battery icon cache */
+static bool     last_ecg_enabled=false;
+static bool     last_battery_valid=false;
+static uint8_t  last_battery_pct=0xFF;
+
 /* ================================================================
  *  PUBLIC API
  * ================================================================ */
@@ -313,6 +334,39 @@ void dashboard_splash(void)
     GC9A01_draw_string(72, 210, "SF7 BLE v2.0");
 }
 
+void dashboard_show_update_splash(const char *title, const char *val)
+{
+    GC9A01_fill_rect(0, 0, 239, 239, DARK_BG);
+    GC9A01_draw_circle(CX, CY, 117, DARK_GRAY);
+    GC9A01_set_back_color(DARK_BG);
+
+    /* Bold = draw the centered string twice, 1px apart */
+    GC9A01_set_font(&Font16);
+    GC9A01_set_text_color(CYAN);
+    int16_t w = (int16_t)(strlen(title) * 11);
+    int16_t x = (240 - w) / 2;
+    if (x < 3) x = 3;
+    int16_t y = CY - 20;
+    GC9A01_draw_string(x,     y, (char *)title);
+    GC9A01_draw_string(x + 1, y, (char *)title);
+
+    if (val[0] != '\0') {
+        w = (int16_t)(strlen(val) * 11);
+        x = (240 - w) / 2;
+        if (x < 3) x = 3;
+        y = CY + 4;
+        GC9A01_set_text_color(SOFT_GREEN);
+        GC9A01_draw_string(x,     y, (char *)val);
+        GC9A01_draw_string(x + 1, y, (char *)val);
+    }
+
+    GC9A01_set_font(&Font12);
+    GC9A01_set_text_color(LIGHT_GRAY);
+    GC9A01_draw_string(62, CY + 30, "Updated from server");
+
+    nrf_delay_ms(1000);
+}
+
 void dashboard_init_layout(void)
 {
     GC9A01_fill_rect(0, 0, 239, 239, DARK_BG);
@@ -327,13 +381,14 @@ void dashboard_init_layout(void)
     /* Row 2: Vertical divider Temp | SpO2 */
     GC9A01_draw_line(MED_GRAY, 120, 63, 120, 116);
 
-    /* Row 3: Vertical divider ECG | HR (50/50 at x=120) */
+    /* Row 3: Vertical divider Steps | HR (50/50 at x=120) */
     GC9A01_draw_line(MED_GRAY, 120, 118, 120, 176);
 
-    /* ── Row 1: BLE Status Bar ── */
-    GC9A01_set_font(&Font12);
-    GC9A01_set_text_color(ORANGE);
-    GC9A01_draw_string(72, 30, "Scanning...");
+    /* ── Row 1: Battery icon placeholder (outline only until battery_valid) ── */
+    {
+        dashboard_data_t tmp = {0};
+        draw_battery_icon(&tmp);
+    }
 
     /* ── Row 2 Left: Temp ── */
     draw_thermometer(32, 78, CYAN);
@@ -344,25 +399,22 @@ void dashboard_init_layout(void)
     /* ── Row 2 Right: SpO2 icon ── */
     draw_droplet(140, 72, 8, SOFT_GREEN);
 
-    /* ── Row 3 Left: ECG label ── */
-    GC9A01_set_font(&Font12);
-    GC9A01_set_text_color(SOFT_RED);
-    GC9A01_draw_string(22, 119, "ECG");
-
-    /* ── Row 3 Right: HR layout (50/50 split) ── */
+    /* ── Row 3 Right: HR layout ── */
     draw_heart(130, 122, 6, SOFT_RED);
     GC9A01_set_font(&Font12);
     GC9A01_set_text_color(LIGHT_GRAY);
     GC9A01_draw_string(180, 120, "bpm");
 
-    /* ── Row 4: Step icon ── */
-    draw_step_icon(38, 194, SOFT_GREEN);
+    /* ── Row 4: ECG label ── */
+    GC9A01_set_font(&Font12);
+    GC9A01_set_text_color(SOFT_RED);
+    GC9A01_draw_string(24, 184, "ECG");
 
     /* Reset chart sweep indices (display memory is blank after SLPIN) */
     hr_dx = 0; hr_py = 170;
     tmp_dx = 0; tmp_py = 110;
     spo2_idx = 0;
-    ecg_dx = 0; ecg_py = 150;
+    ecg_dx = 0; ecg_py = 220;
 
     /* Force all value caches invalid → next update will redraw numbers */
     last_hr = 255;
@@ -371,88 +423,89 @@ void dashboard_init_layout(void)
     last_steps_disp = 0xFFFFFFFF;
     last_rssi = 1;
     last_ble_conn = !last_ble_conn;  /* Toggle → force BLE status full redraw */
+    last_ecg_enabled = !last_ecg_enabled;  /* Toggle → force ECG badge redraw */
+    last_battery_valid = true;             /* Invalid vs default false → forces first draw */
+    last_battery_pct = 0xFF;
 }
 
-/* ── Row 1: BLE Status ── */
+/* ── Row 1: BLE Status ──
+ * Line 1 (y=14): connection status text + battery icon (right)
+ * Line 2 (y=36): full 6-byte BLE address + signal bars (only while connected)
+ */
 void dashboard_update_ble_status(const dashboard_data_t *d)
 {
-    char buf[20];
-    int16_t text_w, text_x;
+    char buf[24];
 
-    /* ── Connection state or device name changed → redraw static elements ── */
     bool name_changed = (strcmp(d->device_name, last_device_name) != 0);
-    if (d->ble_connected != last_ble_conn || name_changed) {
-        /* Save new name */
+    bool conn_changed = (d->ble_connected != last_ble_conn);
+
+    /* ── Line 1: connection status ── */
+    if (conn_changed || name_changed) {
         strncpy(last_device_name, d->device_name, sizeof(last_device_name) - 1);
         last_device_name[sizeof(last_device_name) - 1] = '\0';
-        /* Clear Row 1 area fully */
-        GC9A01_fill_rect(28, 8, 185, 52, DARK_BG);
 
+        GC9A01_fill_rect(28, 8, 122, 16, DARK_BG);
         GC9A01_set_font(&Font12);
-
         if (d->ble_connected) {
-            /* Device name or MAC — CENTERED on line 1 */
-            GC9A01_set_text_color(WHITE);
-            if (d->device_name[0] != '\0') {
-                text_w = strlen(d->device_name) * 7;  /* Font12 ≈ 7px/char */
-                text_x = (240 - text_w) / 2;
-                GC9A01_draw_string(text_x, 14, (char*)d->device_name);
-            } else {
-                snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
-                         d->mac[3], d->mac[2], d->mac[1], d->mac[0]);
-                text_w = strlen(buf) * 7;
-                text_x = (240 - text_w) / 2;
-                GC9A01_draw_string(text_x, 14, buf);
-            }
+            GC9A01_set_text_color(SOFT_GREEN);
+            GC9A01_draw_string(72, 14, "Connected");
         } else {
-            /* Disconnected — MAC centered + "Scanning..." */
-            GC9A01_set_text_color(LIGHT_GRAY);
-            snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
-                     d->mac[3], d->mac[2], d->mac[1], d->mac[0]);
-            text_w = strlen(buf) * 7;
-            text_x = (240 - text_w) / 2;
-            GC9A01_draw_string(text_x, 14, buf);
-
             GC9A01_set_text_color(ORANGE);
-            GC9A01_draw_string(72, 38, "Scanning...");
-
-            /* Signal bars off */
-            draw_signal_bars(165, 36, 0, DARK_GRAY);
+            GC9A01_draw_string(72, 14, "Scanning...");
         }
 
         last_ble_conn = d->ble_connected;
-        last_rssi = 1;  /* Force RSSI redraw on next call */
+        last_rssi = 1;  /* Force line-2 redraw */
     }
 
-    /* ── RSSI changed → update only line 2: "-32 dBm [||||]" ── */
-    if (d->ble_connected && d->rssi != last_rssi) {
-        uint8_t bars;
-        uint16_t bar_color;
-        if (d->rssi > -60)       { bars = 4; bar_color = SOFT_GREEN; }
-        else if (d->rssi > -70)  { bars = 3; bar_color = SOFT_GREEN; }
-        else if (d->rssi > -80)  { bars = 2; bar_color = YELLOW; }
-        else                     { bars = 1; bar_color = SOFT_RED; }
+    /* ── Line 2: patient name (if connected & set) or BLE address + signal bars ──
+     * Redraw only on a meaningful RSSI swing (>10 dBm) to avoid flicker from
+     * minor jitter, or when the connection state / patient name changes. */
+    int16_t rssi_delta = (int16_t)d->rssi - (int16_t)last_rssi;
+    if (rssi_delta < 0) { rssi_delta = -rssi_delta; }
+    if (rssi_delta > 10 || conn_changed || name_changed) {
+        GC9A01_fill_rect(28, 30, 175, 24, DARK_BG);
 
-        /* Clear line 2 */
-        GC9A01_fill_rect(40, 34, 172, 20, DARK_BG);
-
-        /* RSSI number: "-32" */
         GC9A01_set_font(&Font12);
-        GC9A01_set_text_color(bar_color);
-        snprintf(buf, sizeof(buf), "%d", d->rssi);
-        int16_t num_w = strlen(buf) * 7;
-        GC9A01_draw_string(62, 38, buf);
-
-        /* "dBm" right after number */
         GC9A01_set_text_color(LIGHT_GRAY);
-        GC9A01_draw_string(62 + num_w + 3, 38, "dBm");
+        if (d->ble_connected && d->device_name[0] != '\0') {
+            GC9A01_draw_string(40, 36, (char*)d->device_name);
+        } else {
+            snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     d->mac[5], d->mac[4], d->mac[3], d->mac[2], d->mac[1], d->mac[0]);
+            GC9A01_draw_string(40, 36, buf);
+        }
 
-        /* Signal bars — ONE icon after "dBm" */
-        int16_t bars_x = 62 + num_w + 3 + 22 + 6;  /* after "dBm"(21px) + gap */
-        draw_signal_bars(bars_x, 36, bars, bar_color);
+        if (d->ble_connected) {
+            uint8_t bars;
+            uint16_t bar_color;
+            if (d->rssi > -60)       { bars = 4; bar_color = SOFT_GREEN; }
+            else if (d->rssi > -70)  { bars = 3; bar_color = SOFT_GREEN; }
+            else if (d->rssi > -80)  { bars = 2; bar_color = YELLOW; }
+            else                     { bars = 1; bar_color = SOFT_RED; }
+            draw_signal_bars(175, 36, bars, bar_color);
+        }
 
         last_rssi = d->rssi;
     }
+
+    /* Line-1 clears above overlap the battery icon area (x151-167,y14-22)
+     * — always (re)draw it last. */
+    draw_battery_icon(d);
+    last_battery_valid = d->battery_valid;
+    last_battery_pct   = d->battery_pct;
+}
+
+/* ── Row 1: Battery icon (gated standalone update) ── */
+void dashboard_update_battery(const dashboard_data_t *d)
+{
+    if (d->battery_valid == last_battery_valid &&
+        (!d->battery_valid || d->battery_pct == last_battery_pct))
+        return;
+
+    draw_battery_icon(d);
+    last_battery_valid = d->battery_valid;
+    last_battery_pct   = d->battery_pct;
 }
 
 /* ── Row 3 Right: HR + SpO2 ── */
@@ -479,8 +532,13 @@ void dashboard_update_hr(const dashboard_data_t *d)
 
     /* HR Sweep chart — Row 3 right (50/50: x=124, y=175, w=90, h=35) */
     if (d->hr_valid && hr_val > 0) {
+        if (hr_dx < 0) { hr_dx = 0; hr_py = 175; }
         sweep_area_chart(124, 175, 90, 35, &hr_dx, &hr_py,
                          hr_val, 40, 150, hlc, hfc);
+    } else if (hr_dx != -1) {
+        /* Signal lost — clear stale trace so old color doesn't linger */
+        GC9A01_fill_rect(124, 140, 90, 35, DARK_BG);
+        hr_dx = -1;
     }
 
     /* SpO2 number — Row 2 right (unchanged from V1) */
@@ -539,17 +597,37 @@ void dashboard_update_temp(const dashboard_data_t *d)
     }
 }
 
-/* ── Row 3 Left: ECG ── */
+/* ── Row 4: ECG ON/OFF badge + sweep (full width) ── */
 void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val)
 {
-    uint8_t hr_val = d->hr_valid ? (uint8_t)d->hr : 75;
-     ecg_val = (int32_t) (ecg_val * 1000)/4095;
-    /* V2: ECG 50/50 — x=20, y=175, w=96, h=42 */
-    sweep_line(20, 175, 96, 42, &ecg_dx, &ecg_py,
-               ecg_val, 0, 1000, SOFT_RED);
+    /* ON/OFF badge — redraw only when ecg_enabled changes */
+    if (d->ecg_enabled != last_ecg_enabled) {
+        GC9A01_fill_rect(180, 184, 30, 12, DARK_BG);
+        GC9A01_set_font(&Font12);
+        if (d->ecg_enabled) {
+            GC9A01_set_text_color(SOFT_GREEN);
+            GC9A01_draw_string(185, 184, "ON");
+        } else {
+            GC9A01_set_text_color(LIGHT_GRAY);
+            GC9A01_draw_string(185, 184, "OFF");
+        }
+        last_ecg_enabled = d->ecg_enabled;
+    }
+
+    /* Sweep waveform — only while ECG streaming is enabled */
+    if (d->ecg_enabled) {
+        ecg_val = (uint16_t)((ecg_val * 1000) / 4095);
+        if (ecg_dx < 0) { ecg_dx = 0; ecg_py = 220; }
+        sweep_line(62, 220, 116, 28, &ecg_dx, &ecg_py,
+                   ecg_val, 0, 1000, SOFT_RED);
+    } else if (ecg_dx != -1) {
+        /* ECG disabled — clear sweep rect once, idle sentinel */
+        GC9A01_fill_rect(62, 192, 116, 28, DARK_BG);
+        ecg_dx = -1;
+    }
 }
 
-/* ── Row 4: Steps ── */
+/* ── Row 3 Left: Steps (compact) ── */
 void dashboard_update_steps(const dashboard_data_t *d, float ac_value)
 {
     char buf[20];
@@ -558,45 +636,23 @@ void dashboard_update_steps(const dashboard_data_t *d, float ac_value)
 
     /* Update activity */
     s_activity = detect_activity(ac_value, d->cadence, d->steps, s_prev_steps);
-    uint32_t new_s = d->steps - s_prev_steps;
-    if (new_s > 0 && new_s < 100) {
-        s_distance_m += new_s * STRIDE_LENGTH_M;
-        s_calories += new_s * (s_activity == ACT_RUN ? KCAL_RUN : KCAL_WALK);
-    }
     s_prev_steps = d->steps;
-
-    GC9A01_fill_rect(52, 180, 160, 20, DARK_BG);
 
     uint16_t act_color = LIGHT_GRAY;
     if (s_activity == ACT_WALK || s_activity == ACT_FAST_WALK) act_color = SOFT_GREEN;
     else if (s_activity == ACT_RUN) act_color = ORANGE;
 
+    GC9A01_fill_rect(20, 118, 88, 42, DARK_BG);
+    draw_step_icon(33, 132, act_color);
+
     GC9A01_set_font(&Font16);
     GC9A01_set_text_color(act_color);
     snprintf(buf, sizeof(buf), "%d", (int)d->steps);
-    GC9A01_draw_string(52, 183, buf);
+    GC9A01_draw_string(43, 122, buf);
 
     GC9A01_set_font(&Font12);
     GC9A01_set_text_color(act_color);
-    GC9A01_draw_string(115, 185, (char*)act_name(s_activity));
-
-    GC9A01_set_text_color(WHITE);
-    if (s_distance_m >= 1000)
-        snprintf(buf, sizeof(buf), "%d.%dkm",
-                 (int)(s_distance_m / 1000), ((int)s_distance_m % 1000) / 100);
-    else
-        snprintf(buf, sizeof(buf), "%dm", (int)s_distance_m);
-    GC9A01_draw_string(160, 185, buf);
-
-    /* Progress bar */
-    GC9A01_fill_rect(40, 208, 160, 5, MED_GRAY);
-    int16_t prog_w = (d->steps > 5000) ? 160 : (int16_t)((d->steps * 160) / 5000);
-    if (prog_w > 0) GC9A01_fill_rect(40, 208, prog_w, 5, SOFT_GREEN);
-
-    GC9A01_set_font(&Font8);
-    GC9A01_set_text_color(LIGHT_GRAY);
-    snprintf(buf, sizeof(buf), "%d/5000", (int)d->steps);
-    GC9A01_draw_string(82, 216, buf);
+    GC9A01_draw_string(28, 148, (char*)act_name(s_activity));
 
     last_steps_disp = d->steps;
 }

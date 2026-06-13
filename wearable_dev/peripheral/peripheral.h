@@ -58,8 +58,13 @@ void     timer2_init(void);
 uint32_t timer2_now(void);
 
 /* ══════════════════════════════════════════════════════════════
- *  PWM — reserved on TIMER1 (no active use yet)
+ *  PWM — LCD backlight dimming on LCD_BLK_Pin (PWM0)
  * ════════════════════════════════════════════════════════════ */
-void pwm_init(void);  /* placeholder / no-op */
+void pwm_init(void);                       /* init PWM0, sets backlight to 100% */
+
+/* Set LCD backlight brightness. `percent` is clamped to 0–100
+ * (0 = off, 100 = full). Safe to call any time after pwm_init();
+ * a no-op if PWM init failed. */
+void lcd_set_brightness(uint8_t percent);
 
 #endif /* PERIPHERAL_H */

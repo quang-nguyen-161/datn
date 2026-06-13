@@ -15,6 +15,7 @@
 #include "nrf_drv_ppi.h"
 #include "nrf_drv_saadc.h"
 #include "nrf_drv_timer.h"
+#include "nrf_drv_pwm.h"
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 
@@ -77,7 +78,7 @@ bool spi_init(void)
     spi_config.miso_pin  = NRF_DRV_SPI_PIN_NOT_USED;
     spi_config.mosi_pin  = LCD_MOSI_PIN;
     spi_config.sck_pin   = LCD_SCK_PIN;
-    spi_config.frequency = NRF_DRV_SPI_FREQ_4M;
+    spi_config.frequency = NRF_DRV_SPI_FREQ_8M;
     ret_code_t err = nrf_drv_spi_init(&m_lcd_spi, &spi_config, NULL, NULL);
     if (err != NRF_SUCCESS) {
         NRF_LOG_WARNING("[SPI] init failed: 0x%08X", err);
@@ -186,6 +187,7 @@ void adc_set_sample_us(uint32_t us)
                                    ticks,
                                    NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
                                    false);
+    NRF_LOG_INFO("ADC sample period set to %u us (%u ticks)", (unsigned)us, (unsigned)ticks);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -212,11 +214,64 @@ uint32_t timer2_now(void)
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  PWM — reserved on TIMER1 (no active use yet)
+ *  PWM — LCD backlight dimming on LCD_BLK_Pin (PWM0 hardware peripheral)
+ *
+ *  Single-channel PWM at ~1 kHz. Duty cycle 0–LCD_PWM_TOP maps to
+ *  0–100 % brightness (backlight assumed active-high: pin HIGH = lit).
+ *  Uses the dedicated PWM0 peripheral — does not consume a TIMER.
  * ════════════════════════════════════════════════════════════ */
+#define LCD_PWM_TOP   1000u    /* 1 MHz base / 1000 → 1 kHz PWM frequency */
+
+static nrf_drv_pwm_t            m_bl_pwm   = NRF_DRV_PWM_INSTANCE(0);
+static nrf_pwm_values_common_t m_bl_duty[1];      /* live duty (EasyDMA source) */
+static bool                    m_bl_ready = false;
+
+static const nrf_pwm_sequence_t m_bl_seq =
+{
+    .values.p_common = m_bl_duty,
+    .length          = NRF_PWM_VALUES_LENGTH(m_bl_duty),
+    .repeats         = 0,
+    .end_delay       = 0,
+};
+
 void pwm_init(void)
 {
-    /* Placeholder: TIMER1 is reserved for PWM in the timer allocation
-     * map, but no PWM output is currently driven. Implement here when a
-     * PWM channel (e.g. LCD backlight dimming) is added. */
+    nrf_drv_pwm_config_t const cfg =
+    {
+        .output_pins =
+        {
+            LCD_BLK_Pin,                 /* channel 0 → backlight */
+            NRF_DRV_PWM_PIN_NOT_USED,
+            NRF_DRV_PWM_PIN_NOT_USED,
+            NRF_DRV_PWM_PIN_NOT_USED,
+        },
+        .irq_priority = APP_IRQ_PRIORITY_LOWEST,
+        .base_clock   = NRF_PWM_CLK_1MHz,
+        .count_mode   = NRF_PWM_MODE_UP,
+        .top_value    = LCD_PWM_TOP,
+        .load_mode    = NRF_PWM_LOAD_COMMON,
+        .step_mode    = NRF_PWM_STEP_AUTO,
+    };
+
+    if (nrf_drv_pwm_init(&m_bl_pwm, &cfg, NULL) != NRF_SUCCESS)
+    {
+        NRF_LOG_WARNING("[PWM] backlight init failed");
+        return;
+    }
+    m_bl_ready = true;
+    lcd_set_brightness(100);            /* full brightness by default */
+}
+
+void lcd_set_brightness(uint8_t percent)
+{
+    if (!m_bl_ready) { return; }
+    if (percent > 100) { percent = 100; }
+
+    /* polarity bit (0x8000) clear → output HIGH for `duty` ticks each period,
+     * so duty/LCD_PWM_TOP == brightness fraction (active-high backlight). */
+    m_bl_duty[0] = (nrf_pwm_values_common_t)
+                   ((uint32_t)LCD_PWM_TOP * percent / 100u);
+
+    nrf_drv_pwm_simple_playback(&m_bl_pwm, &m_bl_seq, 1,
+                                NRF_DRV_PWM_FLAG_LOOP);
 }
