@@ -61,7 +61,7 @@
 /* Outbound (ESP32 → nRF, forwarded to BLE node) */
 #define PKT_TYPE_CFG        0x03   /* ECG config:   5 B [0xCF][fLo][fHi][iLo][iHi] */
 #define PKT_TYPE_THR        0x04   /* Threshold:   31 B [0xCE][18×u8 PPG/ECG/SpO2][6×u16LE temp×10] */
-#define PKT_TYPE_PPG        0x05   /* PPG config:   5 B [0xCD][fLo][fHi][redMa][irMa] */
+#define PKT_TYPE_PPG        0x05   /* PPG config:   4 B [0xCD][fLo][fHi][hrSrc] */
 #define PKT_TYPE_VCF        0x06   /* Vital cfg:    3 B [0xCC][iLo][iHi] */
 #define PKT_TYPE_MODE       0x07   /* Mode cfg:     7 B [0xCB][mode][periodSec u16 LE][capSec u16 LE][ecgEnabled] */
 #define ECG_CFG_CMD         0xCF
@@ -190,7 +190,7 @@ static void uart_handle_pkt(void)
     switch (s_type) {
         case PKT_TYPE_CFG: fwd = (s_dlen == 5  && s_data[0] == ECG_CFG_CMD);   break;
         case PKT_TYPE_THR: fwd = (s_dlen == 31 && s_data[0] == THR_CMD);       break;
-        case PKT_TYPE_PPG: fwd = (s_dlen == 5  && s_data[0] == PPG_CFG_CMD);   break;
+        case PKT_TYPE_PPG: fwd = (s_dlen == 4  && s_data[0] == PPG_CFG_CMD);   break;
         case PKT_TYPE_VCF: fwd = (s_dlen == 3  && s_data[0] == VITAL_CFG_CMD); break;
         case PKT_TYPE_MODE: fwd = (s_dlen == 7 && s_data[0] == MODE_CFG_CMD); break;
         default: break;

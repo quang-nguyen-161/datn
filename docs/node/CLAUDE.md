@@ -101,15 +101,15 @@ Pending flags are checked at the start of every sensor tick and applied immediat
 |-----|------|-------|--------------|------------|
 | CMD_ECG_CFG | 0xCF | 5 | `g_cmd_cfg_pending` | `adc_set_sample_us(g_cmd_sample_us)` in main loop |
 | CMD_THR | 0xCE | 31 | — | threshold globals updated immediately, no pending |
-| CMD_PPG_CFG | 0xCD | 5 | `g_ppg_cfg_pending` | `max30102_set_sampling_rate()` + `set_led_current_1/2()` in main loop |
+| CMD_PPG_CFG | 0xCD | 3-4 | `g_ppg_cfg_pending` | `max30102_set_sampling_rate()` in main loop (LED current is closed-loop adaptive, see max.c) |
 | CMD_VITAL_CFG | 0xCC | 3 | `g_vital_cfg_pending` | vital BLE tick counter uses `g_vital_interval_ms / 10` directly |
 | CMD_NAME_CFG | 0xC9 | 2-17 | — | `g_patient_name` updated immediately; shown on LCD Row 1 line 2 when connected |
 
 **Wire flow in main.c sensor tick:**
 ```c
 if (g_cmd_cfg_pending)      { g_cmd_cfg_pending = false;  adc_set_sample_us(g_cmd_sample_us); }
-if (g_ppg_cfg_pending)      { g_ppg_cfg_pending = false;  max30102_set_sampling_rate(...);
-                                                            max30102_set_led_current_1/2(...); }
+if (g_ppg_cfg_pending)      { g_ppg_cfg_pending = false;  max30102_set_sampling_rate(...); }
+// LED current is adapted automatically once/sec inside max30102_process() toward PPG_TARGET_ADC
 if (g_vital_cfg_pending)    { g_vital_cfg_pending = false; }  /* interval read live below */
 // vital BLE send: if (++s_ble_tick >= g_vital_interval_ms / 10U) { send_vitals_packet(); }
 ```

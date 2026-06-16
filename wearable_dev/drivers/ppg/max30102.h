@@ -109,6 +109,14 @@ void max30102_read_fifo(uint32_t *pun_red_led, uint32_t *pun_ir_led);
  * (roughly once per PPG_UPDATE_PERIOD samples). */
 bool max30102_process(uint32_t ir, uint32_t red, float *hr_out, float *spo2_out);
 
+/* True when the HR-source channel (IR or RED, per g_ppg_hr_source) is above
+ * the saturation bound — updated every call to max30102_process(). */
+bool max30102_hr_saturated(void);
+
+/* True while a finger is on the sensor but the adaptive LED current loop
+ * hasn't yet converged on PPG_TARGET_ADC — HR/SpO2 are 0 during this window. */
+bool max30102_is_calibrating(void);
+
 /* ── Register-config setters (translated from legacy driver) ── */
 void max30102_reset(void);
 void max30102_turnon(void);

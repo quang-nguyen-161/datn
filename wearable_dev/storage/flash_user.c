@@ -36,6 +36,7 @@ static configuration_t m_dummy_cfg =
     .ppg_ir_ma       = 6U,
 
     .vital_interval_ms = 1000U,
+    .lcd_interval_ms   = 1000U,
 
     .thr_ppg  = {30, 100, 40, 50, 60, 130},
     .thr_ecg  = {40, 100, 50, 120, 40, 130},
@@ -485,12 +486,15 @@ void flash_user_load_config(void)
     {
         g_ppg_sample_freq = m_dummy_cfg.ppg_sample_freq;
     }
-    g_ppg_red_ma = m_dummy_cfg.ppg_red_ma;
-    g_ppg_ir_ma  = m_dummy_cfg.ppg_ir_ma;
+    g_ppg_hr_source = m_dummy_cfg.ppg_hr_source ? 1U : 0U;
 
     if (m_dummy_cfg.vital_interval_ms != 0)
     {
         g_vital_interval_ms = m_dummy_cfg.vital_interval_ms;
+    }
+    if (m_dummy_cfg.lcd_interval_ms != 0)
+    {
+        g_lcd_interval_ms = m_dummy_cfg.lcd_interval_ms;
     }
 
     g_ecg_stream_enabled = m_dummy_cfg.config1_on;   /* reused legacy bool: ECG stream flag */
@@ -549,10 +553,10 @@ void flash_user_save_config(void)
     m_dummy_cfg.ecg_pkt_samples = g_cmd_pkt_samples;
 
     m_dummy_cfg.ppg_sample_freq = g_ppg_sample_freq;
-    m_dummy_cfg.ppg_red_ma      = g_ppg_red_ma;
-    m_dummy_cfg.ppg_ir_ma       = g_ppg_ir_ma;
+    m_dummy_cfg.ppg_hr_source   = g_ppg_hr_source;
 
     m_dummy_cfg.vital_interval_ms = g_vital_interval_ms;
+    m_dummy_cfg.lcd_interval_ms   = g_lcd_interval_ms;
 
     m_dummy_cfg.config1_on = g_ecg_stream_enabled;   /* reused legacy bool: ECG stream flag */
 

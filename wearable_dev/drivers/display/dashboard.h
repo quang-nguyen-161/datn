@@ -19,9 +19,14 @@ typedef struct {
     float    hr;
     float    spo2;
     bool     hr_valid;
+    bool     ppg_saturated;     /* true when the PPG HR-source channel (IR/RED, per
+                                  * g_ppg_hr_source) is saturated — blinks "SAT" badge */
+    bool     ppg_calibrating;   /* true while the adaptive LED current loop is
+                                  * converging — HR/SpO2 show "Cal" instead of "--" */
     float    temperature;
     bool     temp_valid;
     uint32_t steps;
+    bool     steps_valid;       /* false when accelerometer absent — shows "--" */
     float    cadence;
     uint32_t timestamp_ms;
 
@@ -56,6 +61,9 @@ void dashboard_update_ble_status(const dashboard_data_t *d);
 
 /** Update HR + SpO2 display (number + sweep chart in Row 3 right) */
 void dashboard_update_hr(const dashboard_data_t *d);
+
+/** Update "SAT!" blink badge (call every PPG sample for smooth ~2.5Hz blink) */
+void dashboard_update_sat_badge(const dashboard_data_t *d);
 
 /** Update temperature display (number + sweep chart) */
 void dashboard_update_temp(const dashboard_data_t *d);

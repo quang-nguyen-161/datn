@@ -25,11 +25,11 @@ Streams ECG waveform + vitals over BLE to an ESP32 gateway, which publishes to T
 | Timer | Owner |
 |-------|-------|
 | TIMER0 | SoftDevice (reserved) |
-| TIMER1 | unused / reserved |
+| TIMER1 | unused (reserved) |
 | TIMER2 | `timer2_now()` µs counter (peripheral.c) |
 | TIMER3 | SAADC PPI 250 Hz ECG (peripheral.c) — **never reassign** |
 
-LCD backlight PWM uses the dedicated **PWM0** hardware peripheral (`pwm_init()` / `lcd_set_brightness()` in peripheral.c) — it does not consume a TIMER, so TIMER1 remains free.
+LCD backlight is plain GPIO on/off on `LCD_BLK_Pin` (`pwm_init()` / `lcd_set_brightness()` in peripheral.c — names kept for call-site compatibility, no PWM/TIMER1 involved).
 
 ---
 
@@ -38,7 +38,7 @@ LCD backlight PWM uses the dedicated **PWM0** hardware peripheral (`pwm_init()` 
 | Path | Purpose |
 |------|---------|
 | `main.c / main.h` | Top-level init, main loop, vitals BLE send; main.h holds the **board pin map** (per-target `NRF52840_XXAA`/nRF52832 macros) + `sensor_data_t` |
-| `peripheral/peripheral.c/.h` | **All on-chip peripheral init/callbacks/instances**: TWI1 (`twi_init`/`twi_wait`/`m_twi`), SPI0 (`spi_init`/`m_lcd_spi`, 8 MHz), SAADC+PPI+TIMER3 (`adc_init`/`adc_set_sample_us`/`saadc_callback`/`g_ecg_raw`/`g_ecg_ready`), TIMER2 (`timer2_init`/`timer2_now`), PWM0 LCD backlight (`pwm_init`/`lcd_set_brightness`) |
+| `peripheral/peripheral.c/.h` | **All on-chip peripheral init/callbacks/instances**: TWI1 (`twi_init`/`twi_wait`/`m_twi`), SPIM3 (`spi_init`/`m_lcd_spi`, 32 MHz — only nRF52840 SPI instance >8 Mbps), SAADC+PPI+TIMER3 (`adc_init`/`adc_set_sample_us`/`saadc_callback`/`g_ecg_raw`/`g_ecg_ready`), TIMER2 (`timer2_init`/`timer2_now`), LCD backlight GPIO on/off (`pwm_init`/`lcd_set_brightness`) |
 | `ecg/ecg.c` | ECG DSP pipeline + R-peak v1+v2 (calls `adc_init()` from peripheral.c); `hr_ecg_valid` gated by `g_ecg_stream_enabled` |
 | `ecg/ecg.h` | `ecg_init()`, `ecg_process()`, ECG result struct |
 | `cmd/cmd.c` | Gateway RX command parser — CMD_ECG_CFG / CMD_THR / CMD_PPG_CFG / CMD_VITAL_CFG / CMD_NAME_CFG |
@@ -101,7 +101,7 @@ Pending flags are checked at the start of every sensor tick and applied immediat
 |-----|------|-------|--------------|------------|
 | CMD_ECG_CFG | 0xCF | 5 | `g_cmd_cfg_pending` | `adc_set_sample_us(g_cmd_sample_us)` in main loop |
 | CMD_THR | 0xCE | 31 | — | threshold globals updated immediately, no pending |
-| CMD_PPG_CFG | 0xCD | 5 | `g_ppg_cfg_pending` | `max30102_set_sampling_rate()` + `set_led_current_1/2()` in main loop |
+| CMD_PPG_CFG | 0xCD | 3-4 | `g_ppg_cfg_pending` | `max30102_set_sampling_rate()` in main loop (LED current is closed-loop adaptive, see max.c) |
 | CMD_VITAL_CFG | 0xCC | 3 | `g_vital_cfg_pending` | vital BLE tick counter uses `g_vital_interval_ms / 10` directly |
 | CMD_NAME_CFG | 0xC9 | 2-17 | — | `g_patient_name` updated immediately; shown on LCD Row 1 line 2 when connected |
 
@@ -116,8 +116,8 @@ restoring the normal layout (`dashboard_init_layout()`).
 **Wire flow in main.c sensor tick:**
 ```c
 if (g_cmd_cfg_pending)      { g_cmd_cfg_pending = false;  adc_set_sample_us(g_cmd_sample_us); }
-if (g_ppg_cfg_pending)      { g_ppg_cfg_pending = false;  max30102_set_sampling_rate(...);
-                                                            max30102_set_led_current_1/2(...); }
+if (g_ppg_cfg_pending)      { g_ppg_cfg_pending = false;  max30102_set_sampling_rate(...); }
+// LED current is adapted automatically once/sec inside max30102_process() toward PPG_TARGET_ADC
 if (g_vital_cfg_pending)    { g_vital_cfg_pending = false; }  /* interval read live below */
 // vital BLE send: if (++s_ble_tick >= g_vital_interval_ms / 10U) { send_vitals_packet(); }
 ```

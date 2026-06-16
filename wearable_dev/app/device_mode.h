@@ -26,6 +26,15 @@ extern volatile bool g_sensor_tick;
  *    emit one averaged vital packet for this cycle. Consumed in main loop. ── */
 extern volatile bool g_periodic_send_due;
 
+/* ── PERIODIC: set true on capture↔sleep phase transitions — tells main loop
+ *    to power down/restore MAX30102 + LCD backlight. Consumed in main loop. ── */
+extern volatile bool g_periodic_enter_sleep;
+extern volatile bool g_periodic_enter_capture;
+
+/* ── PERIODIC: true while in the sleep phase (between enter_sleep and
+ *    enter_capture) — tells main loop to skip LCD redraws. ── */
+extern volatile bool g_periodic_sleeping;
+
 /* ── API ── */
 void     device_mode_init(void);                    /* call once, reads FDS */
 void     device_mode_set(device_mode_t mode);       /* switches mode, saves to FDS */

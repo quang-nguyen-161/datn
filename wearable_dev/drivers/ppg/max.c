@@ -2,6 +2,7 @@
 #include "filter.h"
 #include "main.h"           /* m_twi, m_xfer_done, m_xfer_error, twi_wait() */
 #include "peripheral.h"     /* timer2_now() — TIMER2 µs counter */
+#include "cmd.h"            /* g_ppg_hr_source — selects which channel drives adaptive current */
 #include "nrf_drv_twi.h"
 #include "nrf_delay.h"
 #include "nrf_log.h"
@@ -48,8 +49,70 @@ static bool ppg_read(uint8_t reg, uint8_t *data, uint16_t len)
 #define PPG_NLMS_MU       0.15f      /* was 0.005 — correct adaptation rate for PPG levels */
 #define PPG_NLMS_EPS      0.01f      /* was 1e-6 — prevents div/0 artifact at startup */
 #define PPG_UPDATE_PERIOD 100      /* emit HR/SpO2 once per ~1 s @ 100 Hz */
-#define PPG_FINGER_THRESHOLD  30000U /* raw ADC count; ambient (no finger) ≈ 500 */
+#define PPG_FINGER_THRESHOLD  30000U /* raw ADC count @ 6 mA LED; ambient (no finger) ≈ 500 */
 #define PPG_FINGER_DEBOUNCE   5      /* consecutive sub-threshold samples → off   */
+#define PPG_BASE_LED_MA       6.0f   /* LED current PPG_FINGER_THRESHOLD was tuned at */
+#define HR_RR_PEAK_WINDOW     60U    /* hr_count() averages over the last N peaks */
+#define PPG_ADC_MAX           262143UL /* 18-bit ADC full scale (0x3FFFF) */
+#define PPG_SAT_RATIO         0.95f  /* fraction of full-scale considered saturated */
+
+/* ── Adaptive LED current control ──
+ * Keeps the RED channel's raw ADC near PPG_TARGET_ADC by nudging the
+ * LED current (shared by IR + RED) up/down by one register step (0.2 mA)
+ * once per second, with a deadband to converge without oscillating. */
+#define PPG_TARGET_ADC        200000UL
+#define PPG_ADC_DEADBAND      5000UL
+#define PPG_LED_PA_MIN        1U      /* 0.2 mA */
+#define PPG_LED_PA_MAX        255U    /* 51.0 mA */
+
+static uint8_t s_ppg_led_pa = 30;     /* 30 * 0.2 mA = 6.0 mA — matches max30102_init default */
+
+/* True while the adaptive LED current loop hasn't yet converged on the
+ * current finger/skin tone — HR/SpO2 are suppressed (output 0) during this
+ * window since the AC/DC ratio is still settling at the new current. */
+static bool    s_ppg_calibrating = true;
+
+/* Adaptive low (no-finger) / high (saturation) bounds for IR & RED, scaled
+ * by the current LED current relative to the level PPG_FINGER_THRESHOLD
+ * was tuned at — higher LED current raises the no-finger floor. */
+static void ppg_get_adaptive_bounds(uint32_t *ir_lo, uint32_t *ir_hi,
+                                     uint32_t *red_lo, uint32_t *red_hi)
+{
+    float led_ma = (float)s_ppg_led_pa * 0.2f;
+
+    *ir_lo  = (uint32_t)(PPG_FINGER_THRESHOLD * (led_ma / PPG_BASE_LED_MA));
+    *red_lo = (uint32_t)(PPG_FINGER_THRESHOLD * (led_ma / PPG_BASE_LED_MA));
+
+    *ir_hi  = (uint32_t)(PPG_ADC_MAX * PPG_SAT_RATIO);
+    *red_hi = (uint32_t)(PPG_ADC_MAX * PPG_SAT_RATIO);
+}
+
+/* Step the shared LED current ±1 register (0.2 mA) toward PPG_TARGET_ADC,
+ * based on the HR-source channel's DC level. No-op within the deadband. */
+static void ppg_adapt_led_current(float hr_channel_dc)
+{
+    if (hr_channel_dc < (float)PPG_TARGET_ADC - (float)PPG_ADC_DEADBAND)
+    {
+        if (s_ppg_led_pa >= PPG_LED_PA_MAX) { s_ppg_calibrating = false; return; }
+        s_ppg_led_pa++;
+        s_ppg_calibrating = true;
+    }
+    else if (hr_channel_dc > (float)PPG_TARGET_ADC + (float)PPG_ADC_DEADBAND)
+    {
+        if (s_ppg_led_pa <= PPG_LED_PA_MIN) { s_ppg_calibrating = false; return; }
+        s_ppg_led_pa--;
+        s_ppg_calibrating = true;
+    }
+    else
+    {
+        s_ppg_calibrating = false; /* within deadband — converged */
+        return;
+    }
+
+    float led_ma = (float)s_ppg_led_pa * 0.2f;
+    max30102_set_led_current_1(led_ma);
+    max30102_set_led_current_2(led_ma);
+}
 
 static biquad_df2t_t s_ir_hp;  /* HP 0.5 Hz — baseline wander removal  */
 static biquad_df2t_t s_ir_lp;  /* LP 5.0 Hz — high-freq noise removal  */
@@ -84,7 +147,11 @@ static float       s_last_hr_out;   /* last good HR/SpO2 — held when the other
 static float       s_last_spo2_out;
 static uint8_t     s_no_finger_cnt;
 static bool        s_finger_on;
-static float       s_ir_env_peak; /* adaptive amplitude envelope for peak gating */
+static float       s_ir_env_peak;  /* adaptive amplitude envelope for peak gating (IR)  */
+static float       s_red_env_peak; /* adaptive amplitude envelope for peak gating (RED) */
+static bool        s_hr_saturated; /* true when the HR-source channel (per g_ppg_hr_source)
+                                     * is above the saturation bound — too much LED current
+                                     * or too much pressure on the sensor */
 
 #define PPG_PEAK_ENV_DECAY  0.992f /* slow envelope decay between beats */
 #define PPG_PEAK_THRESH_RATIO 0.4f /* fire only above 40% of envelope   */
@@ -129,6 +196,9 @@ static void ppg_filters_init(void)
     s_no_finger_cnt   = 0;
     s_finger_on       = false;
     s_ir_env_peak     = 0.0f;
+    s_red_env_peak    = 0.0f;
+    s_hr_saturated    = false;
+    s_ppg_calibrating = true;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -200,6 +270,7 @@ bool max30102_init(void)
     NRF_LOG_INFO("FIFO_CNT=%d", ((32 + wptr) - rptr) % 32);
 
     /* Dump first FIFO sample */
+    bool any_nonzero = false;
     for(int i=0;i<10;i++)
 {
     uint8_t fifo[6];
@@ -210,11 +281,23 @@ bool max30102_init(void)
                  fifo[0], fifo[1], fifo[2],
                  fifo[3], fifo[4], fifo[5]);
 
+    for (int j = 0; j < 6; j++)
+    {
+        if (fifo[j] != 0) any_nonzero = true;
+    }
+
     nrf_delay_ms(100);
 }
 
 
     NRF_LOG_FLUSH();
+
+    if (!any_nonzero)
+    {
+        NRF_LOG_INFO("Init false");
+        NRF_LOG_FLUSH();
+        return false;
+    }
 
     ppg_filters_init();
 
@@ -235,6 +318,13 @@ void max30102_wakeup(void)
     ppg_write(FIFO_WRITE_POINTER_REGISTER, 0x00);
     ppg_write(FIFO_READ_POINTER_REGISTER,  0x00);
     ppg_write(OVER_FLOW_COUNTER_REGISTER,  0x00);
+
+    /* shutdown() zeroes the LED current registers — restore the last
+     * converged adaptive current, otherwise the LEDs stay off after waking
+     * back up. */
+    float led_ma = (float)s_ppg_led_pa * 0.2f;
+    max30102_set_led_current_1(led_ma);
+    max30102_set_led_current_2(led_ma);
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -521,6 +611,8 @@ uint32_t hr_count(rb_t *dt_rb, rb_t *w_rb, uint32_t peak_count)
     uint32_t intervals = peak_count - 1;
     if (intervals > RB_SIZE)
         intervals = RB_SIZE;
+    if (intervals > HR_RR_PEAK_WINDOW - 1)
+        intervals = HR_RR_PEAK_WINDOW - 1;
 
     /* Envelope-weighted average RR: intervals detected on a strong pulse
      * (high s_ir_env_peak at acceptance time) count more than ones detected
@@ -649,8 +741,8 @@ uint32_t spo2_count(rb_t *ir_acdc_rb, rb_t *red_acdc_rb,
         slope = 0.24f;
 
     float spo2 = 114.6f - 55.85f * slope;
-    if (spo2 > 100.0f) spo2 = 100.0f;
-    if (spo2 <  85.0f) spo2 =  85.0f;
+    if (spo2 > 99.0f) spo2 = 99.0f;
+    if (spo2 < 85.0f) spo2 = 85.0f;
 
     return (uint32_t)spo2;
 }
@@ -833,18 +925,38 @@ uint32_t spo2_count1(uint32_t *ir_buff, uint32_t *red_buff,
 bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
                       float *hr_out, float *spo2_out)
 {
-    /* 0. Finger-on/off detection */
-    if (ir_raw < PPG_FINGER_THRESHOLD)
+    bool hr_use_red = (g_ppg_hr_source != 0U);
+
+    /* 0. Finger-on/off + saturation detection (adaptive to LED current) */
     {
-        if (++s_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s_finger_on)
-            ppg_filters_init();
-        if (!s_finger_on)
+        uint32_t ir_lo, ir_hi, red_lo, red_hi;
+        ppg_get_adaptive_bounds(&ir_lo, &ir_hi, &red_lo, &red_hi);
+
+        /* Saturation of the HR-source channel (IR or RED, per g_ppg_hr_source)
+         * is reported regardless of finger state so the LCD can blink a
+         * "SATURATED" warning — too much LED current / pressed too hard. */
+        uint32_t hr_raw = hr_use_red ? red_raw : ir_raw;
+        uint32_t hr_hi  = hr_use_red ? red_hi  : ir_hi;
+        s_hr_saturated  = (hr_raw > hr_hi);
+
+        if (ir_raw < ir_lo || ir_raw > ir_hi || red_raw < red_lo || red_raw > red_hi)
         {
-            *hr_out   = 0.0f;
-            *spo2_out = 0.0f;
-            return true;
+            /* RED saturated — the normal adapt call below is never reached
+             * from this early-return path, so step the LED current down
+             * here too, otherwise SAT stays latched forever. */
+            if (red_raw > red_hi)
+                ppg_adapt_led_current((float)red_raw);
+
+            if (++s_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s_finger_on)
+                ppg_filters_init();
+            if (!s_finger_on)
+            {
+                *hr_out   = 0.0f;
+                *spo2_out = 0.0f;
+                return true;
+            }
+            return false;
         }
-        return false;
     }
     s_no_finger_cnt = 0;
     if (!s_finger_on)
@@ -872,6 +984,11 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
         s_red_hp.s1 = -s_red_hp.b0 * (float)red_raw;
         s_red_hp.s2 = -(s_red_hp.b0 + s_red_hp.b1) * (float)red_raw;
         s_finger_on = true;
+
+        /* New finger contact — skin tone/perfusion changed, so the LED
+         * current converged for the previous contact (or default) may no
+         * longer be near PPG_TARGET_ADC. Re-enter calibration. */
+        s_ppg_calibrating = true;
     }
 
     /* 1. Raw DC (sliding mean) — only s_dc_ir/s_dc_red.dc_comp + warmup
@@ -890,13 +1007,13 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     ir = biquad_step(&s_ir_hp, ir);
     ir = biquad_step(&s_ir_lp, ir);
     //ir = ale_process(&s_ir_nlms, &s_ir_dly, ir);
-    //ir = sg_step(&s_ir_sg, ir);
+    ir = sg_step(&s_ir_sg, ir);
 
     float red = (float)red_raw;
     red = biquad_step(&s_red_hp, red);
     red = biquad_step(&s_red_lp, red);
-    //red = ale_process(&s_red_nlms, &s_red_dly, red);
-    //red = sg_step(&s_red_sg, red);
+		//red = ale_process(&s_red_nlms, &s_red_dly, red);
+    red = sg_step(&s_red_sg, red);
 
     rb_push(&s_ir_rb,  ir);
     rb_push(&s_red_rb, red);
@@ -904,23 +1021,27 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     rb_push(&s_red_acdc_rb, red);
 		
 		
-    /* 3. Peak detection on filtered IR + RR interval accumulation.
-     * Adaptive amplitude envelope: track the running peak of |ir|, decaying
-     * slowly between beats, and only accept local maxima above 40% of it.
-     * Without this, find_peak() fires on any local max — small noise
-     * ripples and the dicrotic notch — inflating the peak count and HR. */
-    float ir_abs = fabsf(ir);
-    if (ir_abs > s_ir_env_peak)
-        s_ir_env_peak = ir_abs;
-    else
-        s_ir_env_peak *= PPG_PEAK_ENV_DECAY;
+    /* 3. Peak detection on the filtered HR-source channel (IR or RED, per
+     * g_ppg_hr_source) + RR interval accumulation. Adaptive amplitude
+     * envelope: track the running peak of |signal|, decaying slowly between
+     * beats, and only accept local maxima above 40% of it. Without this,
+     * find_peak() fires on any local max — small noise ripples and the
+     * dicrotic notch — inflating the peak count and HR. */
+    rb_t  *hr_rb       = hr_use_red ? &s_red_rb       : &s_ir_rb;
+    float *hr_env_peak = hr_use_red ? &s_red_env_peak : &s_ir_env_peak;
+    float  hr_abs      = fabsf(hr_use_red ? red : ir);
 
-    float peak_threshold = s_ir_env_peak * PPG_PEAK_THRESH_RATIO;
+    if (hr_abs > *hr_env_peak)
+        *hr_env_peak = hr_abs;
+    else
+        *hr_env_peak *= PPG_PEAK_ENV_DECAY;
+
+    float peak_threshold = *hr_env_peak * PPG_PEAK_THRESH_RATIO;
 
     /* 350 ms refractory period suppresses dicrotic notch (~250-350 ms after
      * systolic peak), which would otherwise double the apparent HR. */
     uint8_t peak_accepted = 0;
-    if (find_peak_thresh(&s_ir_rb, peak_threshold))
+    if (find_peak_thresh(hr_rb, peak_threshold))
     {
         uint32_t now = timer2_now();
         uint32_t dt  = now - s_last_peak_time;
@@ -934,7 +1055,7 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
                  * well-formed pulse produces a high envelope, so its RR
                  * interval should count more than one detected on a weak
                  * envelope (more likely noise/motion). */
-                rb_push(&s_dt_w_rb, s_ir_env_peak);
+                rb_push(&s_dt_w_rb, *hr_env_peak);
                 s_peak_count++;
             }
             s_last_peak_time = now;
@@ -952,6 +1073,26 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     if (++s_sample_ctr < PPG_UPDATE_PERIOD)
         return false;
     s_sample_ctr = 0;
+
+    /* Adaptive LED current — once per second, once the DC window has
+     * settled, nudge current toward PPG_TARGET_ADC based on the RED
+     * channel's DC level. */
+    if (s_dc_warmup == 0)
+    {
+        ppg_adapt_led_current(s_dc_red.dc_comp);
+    }
+
+    /* While the adaptive LED current loop hasn't converged yet, the AC/DC
+     * ratio is still settling — skip HR/SpO2 computation entirely and
+     * report 0 (LCD shows "Calibrating..."). */
+    if (s_ppg_calibrating)
+    {
+        NRF_LOG_INFO("PPG: calibrating... led=%d.%dmA dc_ir=%d",
+                     (int)(s_ppg_led_pa / 5), (int)((s_ppg_led_pa % 5) * 2), (int)s_dc_ir.dc_comp);
+        *hr_out   = 0.0f;
+        *spo2_out = 0.0f;
+        return true;
+    }
 
     float hr   = (float)hr_count(&s_dt_rb, &s_dt_w_rb, s_peak_count);
     /* Block SpO2 while DC window is still filling after a reset — dc_comp is
@@ -1018,6 +1159,16 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     *hr_out   = s_last_hr_out;
     *spo2_out = s_last_spo2_out;
     return true;
+}
+
+bool max30102_is_calibrating(void)
+{
+    return s_finger_on && s_ppg_calibrating;
+}
+
+bool max30102_hr_saturated(void)
+{
+    return s_hr_saturated;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -1193,15 +1344,20 @@ void max30102_reset_filters(void)
 bool max30102_process2(uint32_t ir_raw, uint32_t red_raw,
                        float *hr_out, float *spo2_out)
 {
-    if (ir_raw < PPG_FINGER_THRESHOLD) {
-        if (++s2_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s2_finger_on)
-            ppg2_filters_init();
-        if (!s2_finger_on) {
-            *hr_out   = 0.0f;
-            *spo2_out = 0.0f;
-            return true;
+    {
+        uint32_t ir_lo, ir_hi, red_lo, red_hi;
+        ppg_get_adaptive_bounds(&ir_lo, &ir_hi, &red_lo, &red_hi);
+
+        if (ir_raw < ir_lo || ir_raw > ir_hi || red_raw < red_lo || red_raw > red_hi) {
+            if (++s2_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s2_finger_on)
+                ppg2_filters_init();
+            if (!s2_finger_on) {
+                *hr_out   = 0.0f;
+                *spo2_out = 0.0f;
+                return true;
+            }
+            return false;
         }
-        return false;
     }
     s2_no_finger_cnt = 0;
     s2_finger_on     = true;

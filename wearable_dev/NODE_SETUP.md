@@ -108,16 +108,19 @@ Temperature encoded ×10 (e.g., 36.1 °C = 361). Thresholds take effect immediat
 
 Tier convention matching dashboard: `norm` = green, `warn` = orange, `dang` = red.
 
-### CMD_PPG_CFG `0xCD` — MAX30102 Sensor Config (5 bytes)
+### CMD_PPG_CFG `0xCD` — MAX30102 Sensor Config (3-4 bytes)
 
 ```
-[0xCD][freq_lo][freq_hi][red_ma][ir_ma]
+[0xCD][freq_lo][freq_hi][hr_src]
 ```
 
 - `freq`: uint16 LE, MAX30102 sample rate in Hz (valid: 50 / 100 / 200 / 400 / 800 / 1000 / 1600 / 3200)
-- `red_ma`: red LED (560 nm) current in mA (uint8)
-- `ir_ma`: IR LED (880 nm) current in mA (uint8)
-- Applied on next sensor tick: `max30102_set_sampling_rate()` + `max30102_set_led_current_1/2()` via I2C
+- `hr_src`: optional uint8 — 0=IR, 1=RED, selects the LED channel used for HR peak detection and as the
+  control input for the adaptive LED current loop (default unchanged if omitted)
+- Applied on next sensor tick: `max30102_set_sampling_rate()` via I2C
+- LED current is no longer configurable — it's adapted automatically once per second toward
+  `PPG_TARGET_ADC` (150000 raw counts) with a ±5000 deadband, in 0.2 mA steps shared by both
+  IR and RED LEDs (see `drivers/ppg/max.c`)
 
 ### CMD_VITAL_CFG `0xCC` — Vitals BLE Notify Interval (3 bytes)
 

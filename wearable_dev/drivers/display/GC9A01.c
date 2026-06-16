@@ -81,7 +81,8 @@ bool lcd_spi_init(void) {
 }
 
 void GC9A01_spi_tx(uint8_t *data, size_t len) {
-    nrf_drv_spi_transfer(&m_lcd_spi, data, len, 0, 0);
+    nrfx_spim_xfer_desc_t xfer = NRFX_SPIM_XFER_TX(data, len);
+    nrfx_spim_xfer(&m_lcd_spi, &xfer, 0);
 }
 
 void GC9A01_init(void) {

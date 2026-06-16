@@ -14,8 +14,8 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 #define CMD_ECG_CFG   0xCF  /* [CMD][freq_lo][freq_hi][int_lo][int_hi]               5 B  */
 #define CMD_THR       0xCE  /* [CMD][ppg×6][ecg×6][spo2×6][temp×12]               31 B  */
-#define CMD_PPG_CFG   0xCD  /* [CMD][freqLo][freqHi][redMa][irMa]                   5 B  */
-#define CMD_VITAL_CFG 0xCC  /* [CMD][intervalLo][intervalHi]                         3 B  */
+#define CMD_PPG_CFG   0xCD  /* [CMD][freqLo][freqHi][hrSrc]                         4 B  (hrSrc optional, default 3 B) */
+#define CMD_VITAL_CFG 0xCC  /* [CMD][intervalLo][intervalHi][lcdIntLo][lcdIntHi]     5 B  (lcd fields optional, default 3 B) */
 #define CMD_MODE_CFG  0xCB  /* [CMD][mode][periodSecLo][periodSecHi][capSecLo][capSecHi][ecgEnabled]  7 B  */
 #define CMD_NAME_CFG  0xC9  /* [CMD][len][name bytes...]                                     2-17 B  */
 
@@ -31,14 +31,19 @@ extern volatile uint16_t g_cmd_pkt_samples;
  * ----------------------------------------------------------------------- */
 extern volatile bool     g_ppg_cfg_pending;
 extern volatile uint16_t g_ppg_sample_freq;  /* Hz  — default 100  */
-extern volatile uint8_t  g_ppg_red_ma;       /* mA  — default 6    */
-extern volatile uint8_t  g_ppg_ir_ma;        /* mA  — default 6    */
+extern volatile uint8_t  g_ppg_hr_source;    /* 0=IR, 1=RED — default 0 (IR) */
 
 /* -----------------------------------------------------------------------
  * Vital reporting interval  (CMD_VITAL_CFG)
  * ----------------------------------------------------------------------- */
 extern volatile bool     g_vital_cfg_pending;
 extern volatile uint16_t g_vital_interval_ms; /* ms  — default 1000 */
+
+/* -----------------------------------------------------------------------
+ * LCD dashboard refresh interval (CONTINUOUS mode), set via CMD_VITAL_CFG
+ * bytes 4-5. Independent of g_vital_interval_ms (BLE vitals send cadence).
+ * ----------------------------------------------------------------------- */
+extern volatile uint16_t g_lcd_interval_ms;   /* ms  — default 1000 */
 
 /* -----------------------------------------------------------------------
  * ECG streaming flag  (CMD_MODE_CFG byte 6)
@@ -59,8 +64,8 @@ extern volatile char     g_patient_name[16]; /* "" = not set, show address */
  * full-screen "Updated" splash on the LCD (dashboard_show_update_splash()).
  * ----------------------------------------------------------------------- */
 extern volatile bool    g_cmd_update_pending;
-extern volatile char    g_cmd_update_msg[20];  /* title, e.g. "ECG Config"   */
-extern volatile char    g_cmd_update_val[24];  /* detail, e.g. "250Hz 200ms" */
+extern volatile char    g_cmd_update_msg[20];   /* title, e.g. "ECG Config"        */
+extern volatile char    g_cmd_update_val[180];  /* detail, '\n'-separated lines    */
 
 /* -----------------------------------------------------------------------
  * Vital thresholds — 3 tiers per vital sign.

@@ -11,6 +11,8 @@
 #include "dashboard.h"
 #include "gc9a01.h"
 #include "nrf_delay.h"
+#include "cmd.h"
+#include "peripheral.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -196,21 +198,33 @@ static void draw_battery_icon(const dashboard_data_t *d)
  * ================================================================ */
 
 static void get_hr_colors(uint8_t v, uint16_t *lc, uint16_t *fc, uint16_t *tc) {
-    if (v<51||v>130) {*lc=SOFT_RED;*fc=DARK_RED;*tc=RED;}
-    else if (v>=100) {*lc=YELLOW;*fc=RGB565(100,100,0);*tc=YELLOW;}
-    else {*lc=SOFT_GREEN;*fc=RGB565(0,100,0);*tc=GREEN;}
+    if (v >= g_thr_ppg_norm_min && v <= g_thr_ppg_norm_max) {
+        *lc=SOFT_GREEN; *fc=RGB565(0,100,0); *tc=GREEN;
+    } else if (v >= g_thr_ppg_warn_min && v <= g_thr_ppg_warn_max) {
+        *lc=YELLOW; *fc=RGB565(100,100,0); *tc=YELLOW;
+    } else {
+        *lc=SOFT_RED; *fc=DARK_RED; *tc=RED;
+    }
 }
 
 static void get_temp_colors(uint16_t t, uint16_t *lc, uint16_t *fc, uint16_t *tc) {
-    if (t<355||t>=385) {*lc=SOFT_RED;*fc=DARK_RED;*tc=RED;}
-    else if (t>=376)   {*lc=YELLOW;*fc=RGB565(100,100,0);*tc=YELLOW;}
-    else               {*lc=CYAN;*fc=RGB565(0,50,100);*tc=CYAN;}
+    if (t >= g_thr_temp_norm_min && t <= g_thr_temp_norm_max) {
+        *lc=CYAN; *fc=RGB565(0,50,100); *tc=CYAN;
+    } else if (t >= g_thr_temp_warn_min && t <= g_thr_temp_warn_max) {
+        *lc=YELLOW; *fc=RGB565(100,100,0); *tc=YELLOW;
+    } else {
+        *lc=SOFT_RED; *fc=DARK_RED; *tc=RED;
+    }
 }
 
 static void get_spo2_colors(uint8_t v, uint16_t *bc, uint16_t *tc) {
-    if (v<90)       {*bc=RED;*tc=RED;}
-    else if (v<=94) {*bc=YELLOW;*tc=YELLOW;}
-    else            {*bc=SOFT_GREEN;*tc=GREEN;}
+    if (v >= g_thr_spo2_norm_min && v <= g_thr_spo2_norm_max) {
+        *bc=SOFT_GREEN; *tc=GREEN;
+    } else if (v >= g_thr_spo2_warn_min && v <= g_thr_spo2_warn_max) {
+        *bc=YELLOW; *tc=YELLOW;
+    } else {
+        *bc=RED; *tc=RED;
+    }
 }
 
 /* ================================================================
@@ -244,22 +258,25 @@ static void sweep_area_chart(int16_t x0, int16_t y0, int16_t w, int16_t h,
     *py=cy; (*dx)++; if(*dx>=w) *dx=0;
 }
 
+/* y0 = vertical CENTER of the chart, h = half-height: vmin -> y0+h (bottom),
+ * vmax -> y0-h (top), midpoint of [vmin,vmax] -> y0 (center). Used for signals
+ * like ECG that swing both above and below a baseline. */
 static void sweep_line(int16_t x0, int16_t y0, int16_t w, int16_t h,
                        int16_t *dx, int16_t *py,
                        int32_t val, int32_t vmin, int32_t vmax,
                        uint16_t color)
 {
     if (val<vmin) val=vmin; if (val>vmax) val=vmax;
-    int16_t cy = y0 - (int16_t)(((float)(val-vmin)/(vmax-vmin))*h);
+    int16_t cy = (int16_t)(y0 + h - ((float)(val-vmin)/(vmax-vmin)) * (2*h));
     int16_t cx = x0 + *dx;
     int16_t clr_w = 6, clr_x = cx + 1;
     if (clr_x < x0+w) {
         int16_t cw=clr_w; if(clr_x+cw>x0+w) cw=(x0+w)-clr_x;
-        GC9A01_fill_rect(clr_x, y0-h, cw, h, DARK_BG);
+        GC9A01_fill_rect(clr_x, y0-h, cw, 2*h, DARK_BG);
     }
     if (cx+1+clr_w > x0+w) {
         int16_t cw=(cx+1+clr_w)-(x0+w);
-        GC9A01_fill_rect(x0, y0-h, cw, h, DARK_BG);
+        GC9A01_fill_rect(x0, y0-h, cw, 2*h, DARK_BG);
     }
     GC9A01_draw_pixel(cx, cy, color);
     if (*dx > 0) GC9A01_draw_line(color, cx-1, *py, cx, cy);
@@ -290,12 +307,13 @@ static void sweep_bar_chart(int16_t x0, int16_t y0, int16_t w, int16_t h,
 static int16_t hr_dx=0, hr_py=170;
 static int16_t tmp_dx=0, tmp_py=110;
 static int16_t spo2_idx=0;
-/* V2: ECG narrower (120px) */
-static int16_t ecg_dx=0, ecg_py=150;
+/* V2: ECG narrower (120px); ecg_py centered (chart drawn around y=206, ±14px) */
+static int16_t ecg_dx=0, ecg_py=206;
 static uint8_t  last_hr=255;
 static uint8_t  last_spo2=255;
 static uint16_t last_temp=0xFFFF;
 static uint32_t last_steps_disp=0xFFFFFFFF;
+static bool     s_steps_na_shown=false;  /* "--" already drawn for absent accel */
 
 /* V2: BLE status cache */
 static int8_t   last_rssi=1;          /* Invalid initial → forces first draw */
@@ -334,35 +352,104 @@ void dashboard_splash(void)
     GC9A01_draw_string(72, 210, "SF7 BLE v2.0");
 }
 
+/* Uppercases src into dst (truncating to dst's capacity). */
+static void to_upper_buf(char *dst, size_t dst_size, const char *src)
+{
+    size_t i;
+    for (i = 0; src[i] != '\0' && i < dst_size - 1; i++)
+    {
+        char c = src[i];
+        dst[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    dst[i] = '\0';
+}
+
+/* Draws a threshold line (e.g. "PPG N60-100 W50-120 D40-130"), centered,
+ * coloring each N/W/D token the same as the dashboard's
+ * Normal/Warning/Dangerous tiers (green/orange/red). Mutates `line`. */
+static void draw_threshold_line(int16_t y, char *line)
+{
+    char   *tokens[8];
+    uint8_t n_tokens = 0;
+    char   *p = line;
+
+    while (*p != '\0' && n_tokens < 8)
+    {
+        tokens[n_tokens++] = p;
+        char *sp = strchr(p, ' ');
+        if (sp == NULL) { break; }
+        *sp = '\0';
+        p = sp + 1;
+    }
+
+    int16_t total_w = 0;
+    for (uint8_t i = 0; i < n_tokens; i++)
+    {
+        total_w += (int16_t)(strlen(tokens[i]) * 7);
+        if (i < n_tokens - 1) { total_w += 7; }
+    }
+
+    int16_t x = (240 - total_w) / 2;
+    if (x < 3) { x = 3; }
+
+    for (uint8_t i = 0; i < n_tokens; i++)
+    {
+        char c0 = tokens[i][0];
+        uint16_t color = (c0 == 'N') ? SOFT_GREEN : (c0 == 'W') ? ORANGE : (c0 == 'D') ? SOFT_RED : WHITE;
+        GC9A01_set_text_color(color);
+        GC9A01_draw_string((uint16_t)x, (uint16_t)y, tokens[i]);
+        x += (int16_t)(strlen(tokens[i]) * 7 + 7);
+    }
+}
+
 void dashboard_show_update_splash(const char *title, const char *val)
 {
+    char title_up[20];
+    char val_up[180];
+    to_upper_buf(title_up, sizeof(title_up), title);
+    to_upper_buf(val_up,   sizeof(val_up),   val);
+
+    bool is_threshold = (strcmp(title_up, "THRESHOLDS") == 0);
+
     GC9A01_fill_rect(0, 0, 239, 239, DARK_BG);
     GC9A01_draw_circle(CX, CY, 117, DARK_GRAY);
     GC9A01_set_back_color(DARK_BG);
 
     /* Bold = draw the centered string twice, 1px apart */
-    GC9A01_set_font(&Font16);
+    GC9A01_set_font(&Font20);
     GC9A01_set_text_color(CYAN);
-    int16_t w = (int16_t)(strlen(title) * 11);
+    int16_t w = (int16_t)(strlen(title_up) * 14);
     int16_t x = (240 - w) / 2;
     if (x < 3) x = 3;
-    int16_t y = CY - 20;
-    GC9A01_draw_string(x,     y, (char *)title);
-    GC9A01_draw_string(x + 1, y, (char *)title);
+    int16_t y = CY - 55;
+    GC9A01_draw_string(x,     y, title_up);
+    GC9A01_draw_string(x + 1, y, title_up);
 
-    if (val[0] != '\0') {
-        w = (int16_t)(strlen(val) * 11);
-        x = (240 - w) / 2;
-        if (x < 3) x = 3;
-        y = CY + 4;
-        GC9A01_set_text_color(SOFT_GREEN);
-        GC9A01_draw_string(x,     y, (char *)val);
-        GC9A01_draw_string(x + 1, y, (char *)val);
+    /* val_up may contain up to 5 '\n'-separated lines, drawn centered below the title */
+    GC9A01_set_font(is_threshold ? &Font12 : &Font16);
+    y = CY - 30;
+    int16_t line_h = is_threshold ? 15 : 18;
+    char *line = val_up;
+    for (uint8_t row = 0; row < 5 && line != NULL; row++)
+    {
+        char *next = strchr(line, '\n');
+        if (next != NULL) { *next = '\0'; }
+
+        if (line[0] != '\0') {
+            if (is_threshold) {
+                draw_threshold_line(y, line);
+            } else {
+                w = (int16_t)(strlen(line) * 11);
+                x = (240 - w) / 2;
+                if (x < 3) x = 3;
+                GC9A01_set_text_color(SOFT_GREEN);
+                GC9A01_draw_string(x, y, line);
+            }
+            y += line_h;
+        }
+
+        line = (next != NULL) ? next + 1 : NULL;
     }
-
-    GC9A01_set_font(&Font12);
-    GC9A01_set_text_color(LIGHT_GRAY);
-    GC9A01_draw_string(62, CY + 30, "Updated from server");
 
     nrf_delay_ms(1000);
 }
@@ -410,11 +497,14 @@ void dashboard_init_layout(void)
     GC9A01_set_text_color(SOFT_RED);
     GC9A01_draw_string(24, 184, "ECG");
 
+    /* Clear ECG sweep area — avoid leftover trace from before this redraw */
+    GC9A01_fill_rect(62, 192, 116, 28, DARK_BG);
+
     /* Reset chart sweep indices (display memory is blank after SLPIN) */
     hr_dx = 0; hr_py = 170;
     tmp_dx = 0; tmp_py = 110;
     spo2_idx = 0;
-    ecg_dx = 0; ecg_py = 220;
+    ecg_dx = 0; ecg_py = 206;
 
     /* Force all value caches invalid → next update will redraw numbers */
     last_hr = 255;
@@ -426,6 +516,17 @@ void dashboard_init_layout(void)
     last_ecg_enabled = !last_ecg_enabled;  /* Toggle → force ECG badge redraw */
     last_battery_valid = true;             /* Invalid vs default false → forces first draw */
     last_battery_pct = 0xFF;
+    s_steps_na_shown = false;
+
+    /* Draw "--" placeholders immediately for every dynamic field, so the
+     * layout is complete from boot even before sensors are read / detected.
+     * Real readings overwrite these on the first valid update. */
+    {
+        dashboard_data_t placeholder = {0};
+        dashboard_update_hr(&placeholder);     /* HR + SpO2 → "--" */
+        dashboard_update_temp(&placeholder);   /* Temp → "--.-" */
+        dashboard_update_steps(&placeholder, 0.0f);  /* Steps → "--" */
+    }
 }
 
 /* ── Row 1: BLE Status ──
@@ -511,6 +612,7 @@ void dashboard_update_battery(const dashboard_data_t *d)
 /* ── Row 3 Right: HR + SpO2 ── */
 void dashboard_update_hr(const dashboard_data_t *d)
 {
+    static bool last_calibrating = false;
     char buf[20];
     uint8_t hr_val = d->hr_valid ? (uint8_t)d->hr : 0;
     uint8_t spo2_val = d->hr_valid ? (uint8_t)d->spo2 : 0;
@@ -520,11 +622,13 @@ void dashboard_update_hr(const dashboard_data_t *d)
     else { hlc = DARK_GRAY; hfc = DARK_GRAY; htc = LIGHT_GRAY; }
 
     /* HR Number — Row 3 right (50/50: x=140, y=118) */
-    if (hr_val != last_hr || (!d->hr_valid && last_hr != 0)) {
+    if (hr_val != last_hr || (!d->hr_valid && last_hr != 0)
+        || d->ppg_calibrating != last_calibrating) {
         GC9A01_fill_rect(140, 118, 38, 16, DARK_BG);
         GC9A01_set_font(&Font16);
         GC9A01_set_text_color(htc);
         if (d->hr_valid) snprintf(buf, sizeof(buf), "%d", hr_val);
+        else if (d->ppg_calibrating) snprintf(buf, sizeof(buf), "Cal");
         else snprintf(buf, sizeof(buf), "--");
         GC9A01_draw_string(142, 118, buf);
         last_hr = hr_val;
@@ -546,7 +650,8 @@ void dashboard_update_hr(const dashboard_data_t *d)
     if (d->hr_valid && spo2_val > 0) get_spo2_colors(spo2_val, &sbc, &stc);
     else { sbc = DARK_GRAY; stc = LIGHT_GRAY; }
 
-    if (spo2_val != last_spo2 || (!d->hr_valid && last_spo2 != 0)) {
+    if (spo2_val != last_spo2 || (!d->hr_valid && last_spo2 != 0)
+        || d->ppg_calibrating != last_calibrating) {
         GC9A01_fill_rect(155, 66, 55, 18, DARK_BG);
         GC9A01_set_font(&Font16);
         GC9A01_set_text_color(stc);
@@ -557,16 +662,49 @@ void dashboard_update_hr(const dashboard_data_t *d)
             GC9A01_set_font(&Font12);
             GC9A01_set_text_color(LIGHT_GRAY);
             GC9A01_draw_string(px, 70, "%");
+        } else if (d->ppg_calibrating) {
+            GC9A01_draw_string(157, 68, "Cal");
         } else {
             GC9A01_draw_string(157, 68, "--");
         }
         last_spo2 = spo2_val;
     }
 
+    last_calibrating = d->ppg_calibrating;
+
     /* SpO2 bar chart — Row 2 right (unchanged) */
     if (d->hr_valid && spo2_val > 0) {
         sweep_bar_chart(125, 115, 90, 25, &spo2_idx, 18,
                         spo2_val, 85, 100);
+    }
+}
+
+/* "SAT" blink badge — Row 3 right, between HR number/bpm row and the
+ * sweep chart. Blinks at ~2.5 Hz while the HR-source PPG channel
+ * (IR or RED, per g_ppg_hr_source) is saturated. Call every PPG sample
+ * so the blink stays smooth even though dashboard_update_hr() only
+ * runs at ~1 Hz. */
+void dashboard_update_sat_badge(const dashboard_data_t *d)
+{
+    static bool     sat_shown = false;
+    static uint32_t last_blink = 0;
+
+    if (d->ppg_saturated) {
+        uint32_t now = timer2_now();
+        if (now - last_blink >= 200000U) {  /* 200 ms */
+            last_blink = now;
+            sat_shown  = !sat_shown;
+            GC9A01_fill_rect(150, 150, 65, 18, DARK_BG);
+            if (sat_shown) {
+                GC9A01_set_font(&Font16);
+                GC9A01_set_text_color(SOFT_RED);
+                GC9A01_draw_string(150, 150, "SAT!");
+            }
+        }
+    } else if (sat_shown || last_blink != 0) {
+        GC9A01_fill_rect(150, 150, 65, 18, DARK_BG);
+        sat_shown  = false;
+        last_blink = 0;
     }
 }
 
@@ -614,11 +752,13 @@ void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val)
         last_ecg_enabled = d->ecg_enabled;
     }
 
-    /* Sweep waveform — only while ECG streaming is enabled */
+    /* Sweep waveform — only while ECG streaming is enabled.
+     * Chart is centered at y=206 (±14px) so the baseline (ecg_val≈500)
+     * sits in the middle, letting the signal swing both up and down. */
     if (d->ecg_enabled) {
         ecg_val = (uint16_t)((ecg_val * 1000) / 4095);
-        if (ecg_dx < 0) { ecg_dx = 0; ecg_py = 220; }
-        sweep_line(62, 220, 116, 28, &ecg_dx, &ecg_py,
+        if (ecg_dx < 0) { ecg_dx = 0; ecg_py = 206; }
+        sweep_line(62, 206, 116, 14, &ecg_dx, &ecg_py,
                    ecg_val, 0, 1000, SOFT_RED);
     } else if (ecg_dx != -1) {
         /* ECG disabled — clear sweep rect once, idle sentinel */
@@ -631,6 +771,18 @@ void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val)
 void dashboard_update_steps(const dashboard_data_t *d, float ac_value)
 {
     char buf[20];
+
+    if (!d->steps_valid) {
+        if (s_steps_na_shown) return;
+        GC9A01_fill_rect(20, 118, 88, 42, DARK_BG);
+        draw_step_icon(33, 132, LIGHT_GRAY);
+        GC9A01_set_font(&Font16);
+        GC9A01_set_text_color(LIGHT_GRAY);
+        GC9A01_draw_string(43, 122, "--");
+        s_steps_na_shown = true;
+        return;
+    }
+    s_steps_na_shown = false;
 
     if (d->steps == last_steps_disp) return;
 

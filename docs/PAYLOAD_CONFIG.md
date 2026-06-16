@@ -221,7 +221,7 @@ All commands start with a single command byte followed directly by the payload:
 |---|---|---|---|
 | `0xCF` | `CMD_ECG_CFG`   |  5 | `[freq_lo][freq_hi][interval_lo][interval_hi]` (2 × uint16 LE) |
 | `0xCE` | `CMD_THR`       | 31 | see expanded layout below |
-| `0xCD` | `CMD_PPG_CFG`   |  5 | `[sampleFreqLo][sampleFreqHi][redMa][irMa]` (uint16 LE + 2 × uint8) |
+| `0xCD` | `CMD_PPG_CFG`   |  4 | `[sampleFreqLo][sampleFreqHi][hrSrc]` (uint16 LE + uint8) |
 | `0xCC` | `CMD_VITAL_CFG` |  3 | `[intervalLo][intervalHi]` (uint16 LE, ms) |
 
 ### CMD_ECG_CFG  `0xCF`  — ECG sampling config
@@ -318,7 +318,7 @@ Written directly to the RX characteristic (`6e401402-b5a3-f393-e0a9-e50e24dcca9e
 |---|---|---|
 | `CMD_THR (0xCE)` | 31 | `[0xCE][18×uint8 PPG/ECG/SpO2 norm/warn/dang min+max][6×uint16LE temp×10]` |
 | `CMD_ECG_CFG (0xCF)` | 5 | `[0xCF][freq_lo][freq_hi][interval_lo][interval_hi]` |
-| `CMD_PPG_CFG (0xCD)` | 5 | `[0xCD][sampleFreqLo][sampleFreqHi][redMa][irMa]` |
+| `CMD_PPG_CFG (0xCD)` | 4 | `[0xCD][sampleFreqLo][sampleFreqHi][hrSrc]` |
 | `CMD_VITAL_CFG (0xCC)` | 3 | `[0xCC][intervalLo][intervalHi]` |
 
 ---
@@ -345,7 +345,7 @@ Written directly to the RX characteristic (`6e401402-b5a3-f393-e0a9-e50e24dcca9e
 | `0x02` | nRF→ESP32 | 5 bytes: `[hrEcg u8][hrPpg u8][spo2 u8][temp u16 LE x10]` | Vitals |
 | `0x03` | ESP32→nRF | 5 bytes: `CMD_ECG_CFG` frame | ECG config → forwarded to BLE RX char |
 | `0x04` | ESP32→nRF | 31 bytes: `CMD_THR` frame | Thresholds → forwarded to BLE RX char |
-| `0x05` | ESP32→nRF | 5 bytes: `CMD_PPG_CFG` frame | PPG config → forwarded to BLE RX char |
+| `0x05` | ESP32→nRF | 4 bytes: `CMD_PPG_CFG` frame | PPG config → forwarded to BLE RX char |
 | `0x06` | ESP32→nRF | 3 bytes: `CMD_VITAL_CFG` frame | Vital interval → forwarded to BLE RX char |
 
 The nRF52832 central forwards the DATA bytes of TYPE 0x03 / 0x04 directly to the target node's RX characteristic, matched by the NAME field.  
@@ -363,7 +363,7 @@ The complete uplink payload (all keys saved on every settings save):
 {
   "vitalInterval": 1000,
   "ecgSampleFreq": 250, "ecgPacketInterval": 500,
-  "ppgSampleFreq": 100, "ppgRedLedMa": 6, "ppgIrLedMa": 6,
+  "ppgSampleFreq": 100, "ppgHrSource": "ir",
   "ppgHr_normalMin": 60,  "ppgHr_normalMax": 100,
   "ppgHr_warnMin":   50,  "ppgHr_warnMax":  120,
   "ppgHr_dangerMin": 40,  "ppgHr_dangerMax": 130,
@@ -388,8 +388,7 @@ The complete uplink payload (all keys saved on every settings save):
 | `ecgSampleFreq` | `250` Hz | ADC sampling rate | — | `CMD_ECG_CFG` |
 | `ecgPacketInterval` | `500` ms | BLE notify interval | — | `CMD_ECG_CFG` |
 | `ppgSampleFreq` | `100` Hz | MAX30102 sample rate | — | configures sensor |
-| `ppgRedLedMa` | `6` mA | Red LED drive current | — | configures sensor |
-| `ppgIrLedMa` | `6` mA | IR LED drive current | — | configures sensor |
+| `ppgHrSource` | `"ir"` | LED channel driving HR detection & adaptive current loop | — | `CMD_PPG_CFG` |
 | `ppgHr_normalMin/Max` | 60 / 100 bpm | PPG HR normal band | `CMD_THR` bytes 1–2 | `CMD_THR` |
 | `ppgHr_warnMin/Max` | 50 / 120 bpm | PPG HR warning band | `CMD_THR` bytes 3–4 | `CMD_THR` |
 | `ppgHr_dangerMin/Max` | 40 / 130 bpm | PPG HR danger band | `CMD_THR` bytes 5–6 | `CMD_THR` |

@@ -85,12 +85,19 @@ typedef struct
     /* Vital reporting interval — CMD_VITAL_CFG */
     uint16_t vital_interval_ms;
 
+    /* LCD dashboard refresh interval (CONTINUOUS mode) — CMD_VITAL_CFG bytes 4-5 */
+    uint16_t lcd_interval_ms;
+
     /* Vital thresholds — CMD_THR. Layout matches cmd.h g_thr_* globals:
      * each array is {norm_min, norm_max, warn_min, warn_max, dang_min, dang_max}. */
     uint8_t  thr_ppg[6];         /* PPG heart rate (bpm)        */
     uint8_t  thr_ecg[6];         /* ECG heart rate (bpm)        */
     uint8_t  thr_spo2[6];        /* SpO2 (%)                    */
     uint16_t thr_temp[6];        /* Temperature (×10 °C)        */
+
+    /* PPG HR source LED — CMD_PPG_CFG byte 5. Appended at the end so older
+     * (smaller) records stay backward compatible — see flash_user.c load. */
+    uint8_t  ppg_hr_source;      /* 0=IR, 1=RED */
 } configuration_t;
 
 

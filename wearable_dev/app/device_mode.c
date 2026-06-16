@@ -17,6 +17,9 @@ uint16_t         g_period_ms         = 10000;   /* 10 s default cycle interval *
 uint16_t         g_capture_ms        = 5000;    /* 5 s default measurement window */
 volatile bool    g_sensor_tick       = false;
 volatile bool    g_periodic_send_due = false;
+volatile bool    g_periodic_enter_sleep   = false;
+volatile bool    g_periodic_enter_capture = false;
+volatile bool    g_periodic_sleeping      = false;
 
 /* ── Sensor polling timer ── */
 APP_TIMER_DEF(m_sensor_timer);
@@ -58,19 +61,28 @@ static void sensor_timer_cb(void *ctx)
     if (s_in_capture)
     {
         g_sensor_tick = true;                   /* full 10 ms rate while capturing */
-        if (++s_phase_ticks >= s_capture_ticks)
+        if (++s_phase_ticks >= s_capture_ticks && s_sleep_ticks)
         {
-            s_in_capture        = false;
+            s_in_capture         = false;
+            s_phase_ticks        = 0;
+            g_periodic_send_due  = true;        /* emit one averaged vital this cycle */
+            g_periodic_enter_sleep = true;
+            g_periodic_sleeping    = true;
+        }
+        else if (s_phase_ticks >= s_capture_ticks)
+        {
             s_phase_ticks       = 0;
-            g_periodic_send_due = true;         /* emit one averaged vital this cycle */
+            g_periodic_send_due = true;
         }
     }
     else if (s_sleep_ticks)                     /* idle: never set g_sensor_tick */
     {
         if (++s_phase_ticks >= s_sleep_ticks)
         {
-            s_in_capture  = true;
-            s_phase_ticks = 0;
+            s_in_capture           = true;
+            s_phase_ticks          = 0;
+            g_periodic_enter_capture = true;
+            g_periodic_sleeping      = false;
         }
     }
 }
@@ -105,9 +117,7 @@ void device_mode_init(void)
     APP_ERROR_CHECK(app_timer_create(&m_sensor_timer, APP_TIMER_MODE_REPEATED, sensor_timer_cb));
     APP_ERROR_CHECK(app_timer_start(m_sensor_timer, APP_TIMER_TICKS(SENSOR_TIMER_MS), NULL));
 
-#if !SENSOR_TEST_MODE
     apply_ble_interval(g_device_mode);
-#endif
 
     NRF_LOG_INFO("device_mode_init: mode=%d period=%d ms capture=%d ms",
                  g_device_mode, g_period_ms, g_capture_ms);
@@ -122,9 +132,20 @@ void device_mode_set(device_mode_t mode)
     if (mode == MODE_PERIODIC)
     {
         /* Begin capturing immediately on entry */
-        s_in_capture        = true;
-        s_phase_ticks       = 0;
-        g_periodic_send_due = false;
+        s_in_capture          = true;
+        s_phase_ticks         = 0;
+        g_periodic_send_due   = false;
+        g_periodic_enter_sleep   = false;
+        g_periodic_enter_capture = true;
+        g_periodic_sleeping      = false;
+    }
+    else if (g_periodic_sleeping)
+    {
+        /* Leaving PERIODIC while LCD/PPG were powered down for sleep —
+         * wake them back up for CONTINUOUS / ECG mode. */
+        g_periodic_enter_sleep   = false;
+        g_periodic_enter_capture = true;
+        g_periodic_sleeping      = false;
     }
     periodic_recompute();
     /* MODE_CONTINUOUS / MODE_ECG: handled directly in sensor_timer_cb */

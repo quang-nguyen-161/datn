@@ -7,41 +7,6 @@
 #include "nrf_saadc.h"      /* NRF_SAADC_INPUT_AIN0 for ECG_SAADC_INPUT */
 #include "peripheral.h"     /* TWI/SPI/ADC/TIMER instances + init API  */
 
-/* ── Single-sensor test mode ──
- * Define exactly one to isolate that sensor for bring-up/debug
- * (BLE/advertising disabled); leave all undefined for normal operation. */
-//#define TEST_SENSOR_MAX
- //#define TEST_SENSOR_TMP
-// #define TEST_SENSOR_ECG
-
-#if defined(TEST_SENSOR_MAX) || defined(TEST_SENSOR_TMP) || defined(TEST_SENSOR_ECG)
-    #define SENSOR_TEST_MODE 1
-#else
-    #define SENSOR_TEST_MODE 0
-#endif
-
-#if SENSOR_TEST_MODE
-    #ifdef TEST_SENSOR_MAX
-        #define ENABLE_MAX 1
-    #else
-        #define ENABLE_MAX 0
-    #endif
-    #ifdef TEST_SENSOR_TMP
-        #define ENABLE_TMP 1
-    #else
-        #define ENABLE_TMP 0
-    #endif
-    #ifdef TEST_SENSOR_ECG
-        #define ENABLE_ECG 1
-    #else
-        #define ENABLE_ECG 0
-    #endif
-#else
-    #define ENABLE_MAX 1
-    #define ENABLE_TMP 1
-    #define ENABLE_ECG 1
-#endif
-
 /* ══════════════════════════════════════════════════════════════
  *  Board pin map — all peripheral pin assignments
  *  nRF52840 (pca10056) has Port 1; nRF52832 (pca10040) is Port 0 only.
@@ -62,7 +27,7 @@
 #define LCD_RES_Pin         NRF_GPIO_PIN_MAP(0, 8)    /* P0.08 RES */
 #define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 11)   /* P0.11 BLK */
 /* Accelerometer INT1 (MMA8452Q) */
-#define MMA8452Q_INT1_PIN   NRF_GPIO_PIN_MAP(0, 27)   /* TODO: confirm on 52840 board */
+#define MMA8452Q_INT1_PIN   NRF_GPIO_PIN_MAP(0, 31)   /* TODO: confirm on 52840 board */
 #else
 /* ── nRF52832 (pca10040) — all pins must be Port 0 (0–31) ── */
 /* I2C (TWI1) — MAX30102 / MMA8452Q / TMP117, 400 kHz */

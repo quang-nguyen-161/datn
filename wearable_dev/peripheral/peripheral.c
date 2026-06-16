@@ -11,11 +11,10 @@
 
 #include "app_error.h"
 #include "nrf_drv_twi.h"
-#include "nrf_drv_spi.h"
 #include "nrf_drv_ppi.h"
 #include "nrf_drv_saadc.h"
 #include "nrf_drv_timer.h"
-#include "nrf_drv_pwm.h"
+#include "nrf_gpio.h"
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 
@@ -67,20 +66,22 @@ void twi_init(void)
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SPI — SPI0 display bus (GC9A01)
+ *  SPI — SPIM3 display bus (GC9A01)
  *  Bus only; LCD GPIO (RES/CS/DC) is configured in GC9A01.c.
+ *  SPIM3 is the only nRF52840 SPI instance capable of >8 Mbps —
+ *  used here at 32 Mbps for max LCD refresh throughput.
  * ════════════════════════════════════════════════════════════ */
-nrf_drv_spi_t    m_lcd_spi    = NRF_DRV_SPI_INSTANCE(0);
+const nrfx_spim_t    m_lcd_spi = NRFX_SPIM_INSTANCE(3);
 
 bool spi_init(void)
 {
-    nrf_drv_spi_config_t spi_config = NRF_DRV_SPI_DEFAULT_CONFIG;
-    spi_config.miso_pin  = NRF_DRV_SPI_PIN_NOT_USED;
+    nrfx_spim_config_t spi_config = NRFX_SPIM_DEFAULT_CONFIG;
+    spi_config.miso_pin  = NRFX_SPIM_PIN_NOT_USED;
     spi_config.mosi_pin  = LCD_MOSI_PIN;
     spi_config.sck_pin   = LCD_SCK_PIN;
-    spi_config.frequency = NRF_DRV_SPI_FREQ_8M;
-    ret_code_t err = nrf_drv_spi_init(&m_lcd_spi, &spi_config, NULL, NULL);
-    if (err != NRF_SUCCESS) {
+    spi_config.frequency = NRF_SPIM_FREQ_32M;
+    nrfx_err_t err = nrfx_spim_init(&m_lcd_spi, &spi_config, NULL, NULL);
+    if (err != NRFX_SUCCESS) {
         NRF_LOG_WARNING("[SPI] init failed: 0x%08X", err);
         return false;
     }
@@ -179,6 +180,16 @@ void adc_init(void)
     NRF_LOG_FLUSH();
 }
 
+void adc_enable(void)
+{
+    nrf_drv_timer_enable(&m_saadc_timer);
+}
+
+void adc_disable(void)
+{
+    nrf_drv_timer_disable(&m_saadc_timer);
+}
+
 void adc_set_sample_us(uint32_t us)
 {
     uint32_t ticks = nrf_drv_timer_us_to_ticks(&m_saadc_timer, us);
@@ -214,64 +225,26 @@ uint32_t timer2_now(void)
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  PWM — LCD backlight dimming on LCD_BLK_Pin (PWM0 hardware peripheral)
+ *  LCD backlight — simple GPIO on/off on LCD_BLK_Pin
  *
- *  Single-channel PWM at ~1 kHz. Duty cycle 0–LCD_PWM_TOP maps to
- *  0–100 % brightness (backlight assumed active-high: pin HIGH = lit).
- *  Uses the dedicated PWM0 peripheral — does not consume a TIMER.
+ *  No PWM dimming: pin driven HIGH (full on) or LOW (off). For
+ *  full panel power-down (display + backlight), pair with
+ *  GC9A01A_sleep_mode(1)/(0) (SLPIN/SLPOUT, GC9A01.c).
  * ════════════════════════════════════════════════════════════ */
-#define LCD_PWM_TOP   1000u    /* 1 MHz base / 1000 → 1 kHz PWM frequency */
-
-static nrf_drv_pwm_t            m_bl_pwm   = NRF_DRV_PWM_INSTANCE(0);
-static nrf_pwm_values_common_t m_bl_duty[1];      /* live duty (EasyDMA source) */
-static bool                    m_bl_ready = false;
-
-static const nrf_pwm_sequence_t m_bl_seq =
-{
-    .values.p_common = m_bl_duty,
-    .length          = NRF_PWM_VALUES_LENGTH(m_bl_duty),
-    .repeats         = 0,
-    .end_delay       = 0,
-};
-
 void pwm_init(void)
 {
-    nrf_drv_pwm_config_t const cfg =
-    {
-        .output_pins =
-        {
-            LCD_BLK_Pin,                 /* channel 0 → backlight */
-            NRF_DRV_PWM_PIN_NOT_USED,
-            NRF_DRV_PWM_PIN_NOT_USED,
-            NRF_DRV_PWM_PIN_NOT_USED,
-        },
-        .irq_priority = APP_IRQ_PRIORITY_LOWEST,
-        .base_clock   = NRF_PWM_CLK_1MHz,
-        .count_mode   = NRF_PWM_MODE_UP,
-        .top_value    = LCD_PWM_TOP,
-        .load_mode    = NRF_PWM_LOAD_COMMON,
-        .step_mode    = NRF_PWM_STEP_AUTO,
-    };
-
-    if (nrf_drv_pwm_init(&m_bl_pwm, &cfg, NULL) != NRF_SUCCESS)
-    {
-        NRF_LOG_WARNING("[PWM] backlight init failed");
-        return;
-    }
-    m_bl_ready = true;
-    lcd_set_brightness(100);            /* full brightness by default */
+    nrf_gpio_cfg_output(LCD_BLK_Pin);
+    nrf_gpio_pin_set(LCD_BLK_Pin);   /* full on by default */
 }
 
 void lcd_set_brightness(uint8_t percent)
 {
-    if (!m_bl_ready) { return; }
-    if (percent > 100) { percent = 100; }
-
-    /* polarity bit (0x8000) clear → output HIGH for `duty` ticks each period,
-     * so duty/LCD_PWM_TOP == brightness fraction (active-high backlight). */
-    m_bl_duty[0] = (nrf_pwm_values_common_t)
-                   ((uint32_t)LCD_PWM_TOP * percent / 100u);
-
-    nrf_drv_pwm_simple_playback(&m_bl_pwm, &m_bl_seq, 1,
-                                NRF_DRV_PWM_FLAG_LOOP);
+    if (percent == 0)
+    {
+        nrf_gpio_pin_clear(LCD_BLK_Pin);
+    }
+    else
+    {
+        nrf_gpio_pin_set(LCD_BLK_Pin);
+    }
 }

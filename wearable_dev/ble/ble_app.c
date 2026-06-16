@@ -27,8 +27,8 @@
 #define APP_BLE_OBSERVER_PRIO       3
 #define APP_ADV_INTERVAL            64          /* 40 ms */
 #define APP_ADV_DURATION            18000       /* 180 s  */
-#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(8,  UNIT_1_25_MS)
-#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(8,  UNIT_1_25_MS)
+#define MIN_CONN_INTERVAL           MSEC_TO_UNITS(200,  UNIT_1_25_MS)
+#define MAX_CONN_INTERVAL           MSEC_TO_UNITS(200,  UNIT_1_25_MS)
 #define SLAVE_LATENCY               0
 #define CONN_SUP_TIMEOUT            MSEC_TO_UNITS(4000, UNIT_10_MS)
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(5000)
@@ -149,6 +149,14 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
 
         case BLE_GAP_EVT_RSSI_CHANGED:
             m_rssi = p_ble_evt->evt.gap_evt.params.rssi_changed.rssi;
+            break;
+
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE:
+            NRF_LOG_INFO("Data length updated: tx_octets=%u rx_octets=%u tx_time=%u rx_time=%u",
+                p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_tx_octets,
+                p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_rx_octets,
+                p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_tx_time_us,
+                p_ble_evt->evt.gap_evt.params.data_length_update.effective_params.max_rx_time_us);
             break;
 
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {

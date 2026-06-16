@@ -66,7 +66,7 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define PKT_TYPE_VIT   0x02
 #define PKT_TYPE_CFG   0x03   // ESP32 → nRF central: ECG config  5 B [0xCF]...
 #define PKT_TYPE_THR   0x04   // ESP32 → nRF central: thresholds 31 B [0xCE]...
-#define PKT_TYPE_PPG   0x05   // ESP32 → nRF central: PPG config  5 B [0xCD]...
+#define PKT_TYPE_PPG   0x05   // ESP32 → nRF central: PPG config  4 B [0xCD]...
 #define PKT_TYPE_VCF   0x06   // ESP32 → nRF central: vital cfg   3 B [0xCC]...
 #define PKT_TYPE_MODE  0x07   // ESP32 → nRF central: mode cfg    6 B [0xCB]...
 #define ECG_CFG_CMD    0xCF
@@ -80,8 +80,7 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define DEFAULT_FREQ_HZ           250
 #define DEFAULT_INTERVAL_MS       200
 #define DEFAULT_PPG_FREQ_HZ       100
-#define DEFAULT_PPG_RED_MA        6
-#define DEFAULT_PPG_IR_MA         6
+#define DEFAULT_PPG_HR_SOURCE     0  // 0=IR, 1=RED
 #define DEFAULT_VITAL_INTERVAL_MS 1000
 #define DEFAULT_DEVICE_MODE       0
 #define DEFAULT_PERIODIC_INTERVAL 10
@@ -91,8 +90,7 @@ const char* TB_HOST_FALLBACK = "192.168.1.100";   // <-- set to your local TB se
 #define TB_KEY_FREQ               "ecgSampleFreq"
 #define TB_KEY_INTERVAL           "ecgPacketInterval"
 #define TB_KEY_PPG_FREQ           "ppgSampleFreq"
-#define TB_KEY_PPG_RED_MA         "ppgRedLedMa"
-#define TB_KEY_PPG_IR_MA          "ppgIrLedMa"
+#define TB_KEY_PPG_HR_SOURCE      "ppgHrSource"
 #define TB_KEY_VITAL_INTERVAL     "vitalInterval"
 #define TB_KEY_DEVICE_MODE        "deviceMode"
 #define TB_KEY_PERIODIC_INTERVAL  "periodicInterval"
@@ -139,8 +137,7 @@ static String nodeTokens[MAX_NODES];
 static int    nodeLastFreq[MAX_NODES];
 static int    nodeLastInterval[MAX_NODES];
 static int    nodeLastPpgFreq[MAX_NODES];
-static int    nodeLastPpgRedMa[MAX_NODES];
-static int    nodeLastPpgIrMa[MAX_NODES];
+static int    nodeLastPpgHrSource[MAX_NODES];
 static int    nodeLastVitalInterval[MAX_NODES];
 static int    nodeLastMode[MAX_NODES];
 static int    nodeLastPeriodicInterval[MAX_NODES];
@@ -509,14 +506,14 @@ static bool resolveNodeToken(const String& name, String& tokenOut) {
 
 static bool fetchNodeConfig(const String& token,
     int& freq, int& interval,
-    int& ppgFreq, int& ppgRedMa, int& ppgIrMa, int& vitalInterval,
+    int& ppgFreq, int& ppgHrSource, int& vitalInterval,
     int& deviceMode, int& periodicInterval, int& captureWindow, int& showEcg,
     int thr[THR_COUNT]) {
   adminClient.setInsecure();
   HTTPClient http;
   String keys = String(TB_KEY_FREQ) + "," + TB_KEY_INTERVAL
-              + "," + TB_KEY_PPG_FREQ + "," + TB_KEY_PPG_RED_MA
-              + "," + TB_KEY_PPG_IR_MA + "," + TB_KEY_VITAL_INTERVAL
+              + "," + TB_KEY_PPG_FREQ + "," + TB_KEY_PPG_HR_SOURCE
+              + "," + TB_KEY_VITAL_INTERVAL
               + "," + TB_KEY_DEVICE_MODE + "," + TB_KEY_PERIODIC_INTERVAL
               + "," + TB_KEY_CAPTURE_WINDOW + "," + TB_KEY_SHOW_ECG;
   for (int i = 0; i < THR_COUNT; i++) { keys += ","; keys += THR_KEYS[i]; }
@@ -529,8 +526,7 @@ static bool fetchNodeConfig(const String& token,
   { int v = jsonInt(body, TB_KEY_FREQ);           if (v > 0) freq          = v; }
   { int v = jsonInt(body, TB_KEY_INTERVAL);        if (v > 0) interval      = v; }
   { int v = jsonInt(body, TB_KEY_PPG_FREQ);        if (v > 0) ppgFreq       = v; }
-  { int v = jsonInt(body, TB_KEY_PPG_RED_MA);      if (v > 0) ppgRedMa      = v; }
-  { int v = jsonInt(body, TB_KEY_PPG_IR_MA);       if (v > 0) ppgIrMa       = v; }
+  { String s = jsonStr(body, TB_KEY_PPG_HR_SOURCE); if (s.length() > 0) ppgHrSource = (s == "red") ? 1 : 0; }
   { int v = jsonInt(body, TB_KEY_VITAL_INTERVAL);  if (v > 0) vitalInterval  = v; }
   { int v = jsonInt(body, TB_KEY_DEVICE_MODE,       -1); if (v >= 0) deviceMode       = v; }
   { int v = jsonInt(body, TB_KEY_PERIODIC_INTERVAL, -1); if (v >  0) periodicInterval = v; }
@@ -608,16 +604,15 @@ static void sendUartThreshold(const String& name, const int thr[THR_COUNT]) {
     name.c_str(), thr[2], thr[3], thr[8], thr[9], thr[14], thr[15], thr[20], thr[21]);
 }
 
-// Build 5-byte PPG config payload: [0xCD][freqLo][freqHi][redMa][irMa]
-static void sendUartPpgConfig(const String& name, int freq, int redMa, int irMa) {
-  uint8_t data[5] = {
+// Build 4-byte PPG config payload: [0xCD][freqLo][freqHi][hrSrc]
+static void sendUartPpgConfig(const String& name, int freq, int hrSource) {
+  uint8_t data[4] = {
     PPG_CFG_CMD,
     (uint8_t)(freq & 0xFF), (uint8_t)((freq >> 8) & 0xFF),
-    (uint8_t)constrain(redMa, 0, 255),
-    (uint8_t)constrain(irMa,  0, 255),
+    (uint8_t)(hrSource ? 1 : 0),
   };
-  _sendUartFrame(PKT_TYPE_PPG, name, data, 5);
-  Serial.printf("[PPG] -> %s: %d Hz red=%d mA ir=%d mA\n", name.c_str(), freq, redMa, irMa);
+  _sendUartFrame(PKT_TYPE_PPG, name, data, 4);
+  Serial.printf("[PPG] -> %s: %d Hz hrSource=%s\n", name.c_str(), freq, hrSource ? "red" : "ir");
 }
 
 // Build 3-byte vital interval payload: [0xCC][intervalLo][intervalHi]
@@ -673,8 +668,7 @@ static void configSyncTask(void*) {
       int freq            = DEFAULT_FREQ_HZ;
       int interval        = DEFAULT_INTERVAL_MS;
       int ppgFreq         = DEFAULT_PPG_FREQ_HZ;
-      int ppgRedMa        = DEFAULT_PPG_RED_MA;
-      int ppgIrMa         = DEFAULT_PPG_IR_MA;
+      int ppgHrSource     = DEFAULT_PPG_HR_SOURCE;
       int vitalInterval   = DEFAULT_VITAL_INTERVAL_MS;
       int deviceMode      = DEFAULT_DEVICE_MODE;
       int periodicInterval = DEFAULT_PERIODIC_INTERVAL;
@@ -686,7 +680,7 @@ static void configSyncTask(void*) {
       bool ok = nodeTokens[i].length() > 0
              && fetchNodeConfig(nodeTokens[i],
                                 freq, interval,
-                                ppgFreq, ppgRedMa, ppgIrMa, vitalInterval,
+                                ppgFreq, ppgHrSource, vitalInterval,
                                 deviceMode, periodicInterval, captureWindow, showEcg,
                                 thr);
 
@@ -700,11 +694,10 @@ static void configSyncTask(void*) {
         sendUartConfig(names[i], freq, interval);
       }
 
-      if (ppgFreq != nodeLastPpgFreq[i] || ppgRedMa != nodeLastPpgRedMa[i] || ppgIrMa != nodeLastPpgIrMa[i]) {
-        nodeLastPpgFreq[i]  = ppgFreq;
-        nodeLastPpgRedMa[i] = ppgRedMa;
-        nodeLastPpgIrMa[i]  = ppgIrMa;
-        sendUartPpgConfig(names[i], ppgFreq, ppgRedMa, ppgIrMa);
+      if (ppgFreq != nodeLastPpgFreq[i] || ppgHrSource != nodeLastPpgHrSource[i]) {
+        nodeLastPpgFreq[i]      = ppgFreq;
+        nodeLastPpgHrSource[i]  = ppgHrSource;
+        sendUartPpgConfig(names[i], ppgFreq, ppgHrSource);
       }
 
       if (vitalInterval != nodeLastVitalInterval[i]) {

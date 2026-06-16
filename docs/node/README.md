@@ -133,7 +133,7 @@ MAX30102 FIFO (IR + RED, 18-bit)
 |-----|-------|---------|--------|
 | `0xCF` CMD_ECG_CFG | 5 | `[freq_lo][freq_hi][int_lo][int_hi]` | reconfigures TIMER3 rate + packet size |
 | `0xCE` CMD_THR | 31 | PPG/ECG/SpO2 thresholds (uint8) + temp thresholds (uint16 ×10 °C) | updates alert globals immediately |
-| `0xCD` CMD_PPG_CFG | 5 | `[freqLo][freqHi][redMa][irMa]` | reconfigures MAX30102 SR + LED currents |
+| `0xCD` CMD_PPG_CFG | 3-4 | `[freqLo][freqHi][hrSrc]` | reconfigures MAX30102 sample rate + HR-source channel (LED current is adaptive) |
 | `0xCC` CMD_VITAL_CFG | 3 | `[intervalLo][intervalHi]` | sets BLE vitals notify interval (ms) |
 
 ---
