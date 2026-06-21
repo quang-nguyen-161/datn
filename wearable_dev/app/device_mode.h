@@ -41,6 +41,8 @@ void     device_mode_set(device_mode_t mode);       /* switches mode, saves to F
 void     device_mode_set_period(uint16_t seconds);  /* periodic interval (5–60 s), saves */
 void     device_mode_set_capture(uint16_t seconds); /* periodic capture window (≥5 s), saves */
 uint16_t device_mode_get_period(void);
+uint16_t device_mode_get_tick_ms(void);             /* current sensor tick interval (ms) */
+void     device_mode_set_tick_ms(uint16_t ms);      /* change tick; restarts timer live */
 
 /* ── BLE RX command protocol (called from cus_service RX handler) ──
  *   Byte 0 = command type:

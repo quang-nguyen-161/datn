@@ -57,6 +57,8 @@ bool lcd_spi_init(void);   /* returns false if SPI init fails (LCD not present) 
 void GC9A01_init(void);
 void GC9A01A_sleep_mode(uint8_t Mode);
 void GC9A01_spi_tx(uint8_t *data, size_t len);
+/* Set display rotation: 0=0°, 1=90°, 2=180°, 3=270°. Default after init is 2. */
+void GC9A01_set_rotation(uint8_t rotation);
 
 /* Display write func */
 void GC9A01_write(uint8_t *data, size_t len);

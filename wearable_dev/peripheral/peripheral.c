@@ -66,12 +66,12 @@ void twi_init(void)
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  SPI — SPIM3 display bus (GC9A01)
+ *  SPI — display bus (GC9A01)
  *  Bus only; LCD GPIO (RES/CS/DC) is configured in GC9A01.c.
- *  SPIM3 is the only nRF52840 SPI instance capable of >8 Mbps —
- *  used here at 32 Mbps for max LCD refresh throughput.
+ *  LCD_SPI_INSTANCE / LCD_SPI_FREQ are set per-target in main.h:
+ *    nRF52840 → SPIM3 @ 32 MHz   nRF52832 → SPIM0 @ 8 MHz
  * ════════════════════════════════════════════════════════════ */
-const nrfx_spim_t    m_lcd_spi = NRFX_SPIM_INSTANCE(3);
+const nrfx_spim_t    m_lcd_spi = NRFX_SPIM_INSTANCE(LCD_SPI_INSTANCE);
 
 bool spi_init(void)
 {
@@ -79,7 +79,7 @@ bool spi_init(void)
     spi_config.miso_pin  = NRFX_SPIM_PIN_NOT_USED;
     spi_config.mosi_pin  = LCD_MOSI_PIN;
     spi_config.sck_pin   = LCD_SCK_PIN;
-    spi_config.frequency = NRF_SPIM_FREQ_32M;
+    spi_config.frequency = LCD_SPI_FREQ;
     nrfx_err_t err = nrfx_spim_init(&m_lcd_spi, &spi_config, NULL, NULL);
     if (err != NRFX_SUCCESS) {
         NRF_LOG_WARNING("[SPI] init failed: 0x%08X", err);

@@ -10,9 +10,15 @@
 #include "nrf_log_default_backends.h"
 #include "app_error.h"
 
-#define ORIENTATION 2 // Set the display orientation 0,1,2,3
-
 #define SPI 0 // SPI (1) or SPIM (0) mode
+
+/* MADCTL (0x36) values — BGR=1 throughout to match panel wiring.
+ * 0=0°  MY=0 MX=0 MV=0
+ * 1=90° MY=0 MX=1 MV=1  (swap axes + flip columns → 90° CW)
+ * 2=180° MY=1 MX=1 MV=0
+ * 3=270° MY=1 MX=0 MV=1 (swap axes + flip rows → 90° CCW) */
+static const uint8_t s_madctl[4] = { 0x08, 0x68, 0xC8, 0xA8 };
+static uint8_t s_rotation = 2;   /* default: 180° — matches prior ORIENTATION 2 */
 
 #define RESET_ON            nrf_gpio_pin_set(LCD_RES_Pin)
 #define RESET_OFF           nrf_gpio_pin_clear(LCD_RES_Pin)
@@ -149,16 +155,7 @@ void GC9A01_init(void) {
     GC9A01_write_byte(0x20); // used 0x00
     
     GC9A01_write_command(0x36);
-    
-#if ORIENTATION == 0
-    GC9A01_write_byte(0x18);
-#elif ORIENTATION == 1
-    GC9A01_write_byte(0x28);
-#elif ORIENTATION == 2
-    GC9A01_write_byte(0xC8); // MY+MX flip → rotate 180deg
-#else
-    GC9A01_write_byte(0x88);
-#endif
+    GC9A01_write_byte(s_madctl[s_rotation]);
     
     GC9A01_write_command(COLOR_MODE);
     GC9A01_write_byte(COLOR_MODE__18_BIT);
@@ -405,6 +402,13 @@ void GC9A01_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h,
     frame.end.X = 239;
     frame.end.Y = 239;
     GC9A01_set_frame(frame);
+}
+
+void GC9A01_set_rotation(uint8_t rotation)
+{
+    s_rotation = rotation & 0x03;
+    GC9A01_write_command(0x36);
+    GC9A01_write_byte(s_madctl[s_rotation]);
 }
 
 void GC9A01_fonts_init(void) {

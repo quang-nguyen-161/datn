@@ -39,20 +39,21 @@ static bool ppg_read(uint8_t reg, uint8_t *data, uint16_t len)
 
 /* ══════════════════════════════════════════════════════════
  *  PPG DSP filter state (IR + RED channels, Fs = 100 Hz)
- *  Pipeline: HP 0.5 Hz → LP 5 Hz → ALE-NLMS → Savitzky-Golay
+ *  Pipeline: HP 0.5 Hz → LP 4 Hz → ALE-NLMS → Savitzky-Golay
  * ══════════════════════════════════════════════════════════ */
 
 /* ── Tunable PPG filter/algorithm parameters (~1–2 Hz pulse @ 100 Hz) ── */
 #define PPG_NLMS_TAPS     16
-#define PPG_ALE_DELAY     6          /* 60 ms — shorter than dicrotic (~300 ms) */
-#define PPG_SG_WINDOW     15
+#define PPG_ALE_DELAY  6           /* 60 ms @ 100 Hz default — overridden dynamically in init */
+#define PPG_SG_WINDOW  15          /* 150 ms @ 100 Hz default — overridden dynamically in init */
 #define PPG_NLMS_MU       0.15f      /* was 0.005 — correct adaptation rate for PPG levels */
 #define PPG_NLMS_EPS      0.01f      /* was 1e-6 — prevents div/0 artifact at startup */
-#define PPG_UPDATE_PERIOD 100      /* emit HR/SpO2 once per ~1 s @ 100 Hz */
+static uint32_t s_ppg_update_period = 100; /* emit HR/SpO2 once per ~1 s; recomputed on Fs change */
+static float    s_ppg_fs            = 100.0f; /* current sample rate; updated by max30102_reset_filters */
 #define PPG_FINGER_THRESHOLD  30000U /* raw ADC count @ 6 mA LED; ambient (no finger) ≈ 500 */
 #define PPG_FINGER_DEBOUNCE   5      /* consecutive sub-threshold samples → off   */
 #define PPG_BASE_LED_MA       6.0f   /* LED current PPG_FINGER_THRESHOLD was tuned at */
-#define HR_RR_PEAK_WINDOW     60U    /* hr_count() averages over the last N peaks */
+#define HR_RR_PEAK_WINDOW     20U    /* hr_count() averages over the last N peaks */
 #define PPG_ADC_MAX           262143UL /* 18-bit ADC full scale (0x3FFFF) */
 #define PPG_SAT_RATIO         0.95f  /* fraction of full-scale considered saturated */
 
@@ -60,8 +61,8 @@ static bool ppg_read(uint8_t reg, uint8_t *data, uint16_t len)
  * Keeps the RED channel's raw ADC near PPG_TARGET_ADC by nudging the
  * LED current (shared by IR + RED) up/down by one register step (0.2 mA)
  * once per second, with a deadband to converge without oscillating. */
-#define PPG_TARGET_ADC        200000UL
-#define PPG_ADC_DEADBAND      5000UL
+#define PPG_TARGET_ADC        180000UL
+#define PPG_ADC_DEADBAND      30000UL  /* accept 150000–210000 to avoid frequent re-cal */
 #define PPG_LED_PA_MIN        1U      /* 0.2 mA */
 #define PPG_LED_PA_MAX        255U    /* 51.0 mA */
 
@@ -87,27 +88,45 @@ static void ppg_get_adaptive_bounds(uint32_t *ir_lo, uint32_t *ir_hi,
     *red_hi = (uint32_t)(PPG_ADC_MAX * PPG_SAT_RATIO);
 }
 
-/* Step the shared LED current ±1 register (0.2 mA) toward PPG_TARGET_ADC,
- * based on the HR-source channel's DC level. No-op within the deadband. */
+/* Step the shared LED current toward PPG_TARGET_ADC.
+ *
+ * Two-speed: 5 PA (1 mA) when far from target, 1 PA (0.2 mA) when close.
+ * Rate-limited to one step per second so the 125-sample DC sliding window
+ * (DC_WINDOW samples) fully settles before the next decision — prevents the
+ * saturation early-return path (called every sample) from racing to PA_MIN. */
 static void ppg_adapt_led_current(float hr_channel_dc)
 {
-    if (hr_channel_dc < (float)PPG_TARGET_ADC - (float)PPG_ADC_DEADBAND)
+    static uint32_t s_last_adapt_us = 0;
+    uint32_t now_us = timer2_now();
+    if (s_last_adapt_us != 0 && (now_us - s_last_adapt_us) < 1000000U)
+        return;
+
+    float error     = hr_channel_dc - (float)PPG_TARGET_ADC;
+    float abs_error = error < 0.0f ? -error : error;
+
+    if (abs_error <= (float)PPG_ADC_DEADBAND)
     {
-        if (s_ppg_led_pa >= PPG_LED_PA_MAX) { s_ppg_calibrating = false; return; }
-        s_ppg_led_pa++;
-        s_ppg_calibrating = true;
-    }
-    else if (hr_channel_dc > (float)PPG_TARGET_ADC + (float)PPG_ADC_DEADBAND)
-    {
-        if (s_ppg_led_pa <= PPG_LED_PA_MIN) { s_ppg_calibrating = false; return; }
-        s_ppg_led_pa--;
-        s_ppg_calibrating = true;
-    }
-    else
-    {
-        s_ppg_calibrating = false; /* within deadband — converged */
+        s_ppg_calibrating = false;
         return;
     }
+    s_last_adapt_us = now_us;
+
+    /* Coarse step far from target, fine step near target. */
+    uint8_t step = (abs_error > 40000.0f) ? 5 : 1;
+
+    if (error < 0.0f)  /* dc below target — increase current */
+    {
+        if (s_ppg_led_pa >= PPG_LED_PA_MAX) { s_ppg_calibrating = false; return; }
+        uint8_t room = PPG_LED_PA_MAX - s_ppg_led_pa;
+        s_ppg_led_pa += (step < room) ? step : room;
+    }
+    else               /* dc above target — decrease current */
+    {
+        if (s_ppg_led_pa <= PPG_LED_PA_MIN) { s_ppg_calibrating = false; return; }
+        uint8_t room = s_ppg_led_pa - PPG_LED_PA_MIN;
+        s_ppg_led_pa -= (step < room) ? step : room;
+    }
+    s_ppg_calibrating = true;
 
     float led_ma = (float)s_ppg_led_pa * 0.2f;
     max30102_set_led_current_1(led_ma);
@@ -141,8 +160,8 @@ static uint32_t    s_peak_count;
 static uint32_t    s_last_peak_time;
 static uint32_t    s_sample_ctr;
 static uint32_t    s_dc_warmup;    /* samples remaining until DC window is full */
-static float       s_hr_hist[3];
-static float       s_spo2_hist[3];
+static float       s_hr_hist[5];
+static float       s_spo2_hist[5];
 static float       s_last_hr_out;   /* last good HR/SpO2 — held when the other metric's window is invalid */
 static float       s_last_spo2_out;
 static uint8_t     s_no_finger_cnt;
@@ -153,22 +172,29 @@ static bool        s_hr_saturated; /* true when the HR-source channel (per g_ppg
                                      * is above the saturation bound — too much LED current
                                      * or too much pressure on the sensor */
 
-#define PPG_PEAK_ENV_DECAY  0.992f /* slow envelope decay between beats */
 #define PPG_PEAK_THRESH_RATIO 0.4f /* fire only above 40% of envelope   */
+static float s_peak_env_decay = 0.992f; /* recomputed in ppg_filters_init: exp(-1/(1.25*fs)) */
 
-static void ppg_filters_init(void)
+static void ppg_filters_init(float fs)
 {
-    butter2_hp_coeffs(100.0f, 1.0f, &s_ir_hp);
-    butter2_lp_coeffs(100.0f, 3.0f, &s_ir_lp);
-    nlms_init_n(&s_ir_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
-    delay_init_d(&s_ir_dly, PPG_ALE_DELAY);
-    sg_init_n(&s_ir_sg, PPG_SG_WINDOW);
+    s_ppg_fs            = fs;
+    s_ppg_update_period = (uint32_t)fs; /* 1-second update period at any Fs */
+    s_peak_env_decay    = expf(-1.0f / (1.25f * fs)); /* τ = 1.25 s regardless of Fs */
 
-    butter2_hp_coeffs(100.0f, 1.0f, &s_red_hp);
-    butter2_lp_coeffs(100.0f, 3.0f, &s_red_lp);
+    int ale = (int)(fs * 0.060f); if (ale < 1) ale = 1; if (ale > 32) ale = 32;
+    int sgw = (int)(fs * 0.150f) | 1; if (sgw < 5) sgw = 5; if (sgw > RB_SIZE-1) sgw = RB_SIZE-1;
+
+    butter2_hp_coeffs(fs, 1.0f, &s_ir_hp);
+    butter2_lp_coeffs(fs, 4.0f, &s_ir_lp);
+    nlms_init_n(&s_ir_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
+    delay_init_d(&s_ir_dly, ale);
+    sg_init_n(&s_ir_sg, sgw);
+
+    butter2_hp_coeffs(fs, 1.0f, &s_red_hp);
+    butter2_lp_coeffs(fs, 4.0f, &s_red_lp);
     nlms_init_n(&s_red_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
-    delay_init_d(&s_red_dly, PPG_ALE_DELAY);
-    sg_init_n(&s_red_sg, PPG_SG_WINDOW);
+    delay_init_d(&s_red_dly, ale);
+    sg_init_n(&s_red_sg, sgw);
 
     /* reset streaming state */
     memset(&s_ir_rb,  0, sizeof(s_ir_rb));
@@ -185,12 +211,8 @@ static void ppg_filters_init(void)
     s_last_peak_time  = 0;
     s_sample_ctr      = 0;
     s_dc_warmup       = DC_WINDOW;
-    s_hr_hist[0]      = 0.0f;
-    s_hr_hist[1]      = 0.0f;
-    s_hr_hist[2]      = 0.0f;
-    s_spo2_hist[0]    = 0.0f;
-    s_spo2_hist[1]    = 0.0f;
-    s_spo2_hist[2]    = 0.0f;
+    memset(s_hr_hist,   0, sizeof(s_hr_hist));
+    memset(s_spo2_hist, 0, sizeof(s_spo2_hist));
     s_last_hr_out     = 0.0f;
     s_last_spo2_out   = 0.0f;
     s_no_finger_cnt   = 0;
@@ -299,7 +321,7 @@ bool max30102_init(void)
         return false;
     }
 
-    ppg_filters_init();
+    ppg_filters_init(100.0f);
 
     return true;
 }
@@ -891,19 +913,12 @@ uint32_t spo2_count1(uint32_t *ir_buff, uint32_t *red_buff,
 
     float slope = (red_ac / red_dc) / (ir_ac / ir_dc);
 
-    if (slope <= 2.5f && slope >= 0.8f)
-        slope = (slope - 0.8f) / (2.5f - 0.8f) * (0.294118f - 0.241176f) + 0.241176f;
-    else if (slope < 0.8f && slope >= 0.0f)
-        slope = slope / 0.8f * (0.235294f - 0.182353f) + 0.182353f;
-    else if (slope > 2.5f && slope <= 10.0f)
-        slope = (slope - 2.5f) / (10.0f - 2.5f) * (0.470588f - 0.3f) + 0.3f;
-    else if (slope > 10.0f)
-        slope = 0.529f;
-    else
-        slope = 0.24f;
+    // if (slope >= 0.4f && slope <= 0.7f) return 97;
 
-    float spo2 = 104.0f - 17.0f * slope;
-    if (spo2 > 100.0f) spo2 = 99.0f;
+    /* Original formula, cap at 97: naturally gives 97% for R < 0.88,
+     * preserves old curve for R > 0.88 (SpO2 < 97%). */
+    float spo2 = 119.0f - 25.0f * slope;
+    if (spo2 > 97.0f) spo2 = 97.0f;
 
     return (uint32_t)spo2;
 }
@@ -948,7 +963,7 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
                 ppg_adapt_led_current((float)red_raw);
 
             if (++s_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s_finger_on)
-                ppg_filters_init();
+                ppg_filters_init(s_ppg_fs);
             if (!s_finger_on)
             {
                 *hr_out   = 0.0f;
@@ -975,6 +990,7 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
         s_dc_red.dc_comp = (float)red_raw;
         s_dc_ir.idx      = 0;
         s_dc_red.idx     = 0;
+        s_dc_warmup      = 0; /* DC already correct from preload — no delay needed */
 
         /* Preload HP filter state so the AC signal starts at zero instead
          * of a multi-second decay from ~raw_value (DF2T steady-state for
@@ -1007,13 +1023,13 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     ir = biquad_step(&s_ir_hp, ir);
     ir = biquad_step(&s_ir_lp, ir);
     //ir = ale_process(&s_ir_nlms, &s_ir_dly, ir);
-    ir = sg_step(&s_ir_sg, ir);
+    //ir = sg_step(&s_ir_sg, ir);
 
     float red = (float)red_raw;
     red = biquad_step(&s_red_hp, red);
     red = biquad_step(&s_red_lp, red);
 		//red = ale_process(&s_red_nlms, &s_red_dly, red);
-    red = sg_step(&s_red_sg, red);
+    //red = sg_step(&s_red_sg, red);
 
     rb_push(&s_ir_rb,  ir);
     rb_push(&s_red_rb, red);
@@ -1034,7 +1050,7 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     if (hr_abs > *hr_env_peak)
         *hr_env_peak = hr_abs;
     else
-        *hr_env_peak *= PPG_PEAK_ENV_DECAY;
+        *hr_env_peak *= s_peak_env_decay;
 
     float peak_threshold = *hr_env_peak * PPG_PEAK_THRESH_RATIO;
 
@@ -1070,7 +1086,7 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
     /* 4. Emit a result once per PPG_UPDATE_PERIOD samples */
     if (s_dc_warmup > 0) s_dc_warmup--;
 
-    if (++s_sample_ctr < PPG_UPDATE_PERIOD)
+    if (++s_sample_ctr < s_ppg_update_period)
         return false;
     s_sample_ctr = 0;
 
@@ -1111,48 +1127,58 @@ bool max30102_process(uint32_t ir_raw, uint32_t red_raw,
      * s_last_spo2_out) when its own window is invalid. */
     if (hr >= HR_MIN && hr <= HR_MAX)
     {
-        /* 3-sample HR history smoothing (median — one bad second doesn't pull output) */
-        s_hr_hist[0] = s_hr_hist[1];
-        s_hr_hist[1] = s_hr_hist[2];
-        s_hr_hist[2] = hr;
-
-        float a = s_hr_hist[0], b = s_hr_hist[1], c = s_hr_hist[2];
-        if (a == 0.0f || b == 0.0f)
+        s_hr_hist[0] = s_hr_hist[1]; s_hr_hist[1] = s_hr_hist[2];
+        s_hr_hist[2] = s_hr_hist[3]; s_hr_hist[3] = s_hr_hist[4];
+        s_hr_hist[4] = hr;
+        if (s_hr_hist[0] == 0.0f)
         {
-            /* fewer than 3 valid readings yet — use latest */
             s_last_hr_out = hr;
         }
         else
         {
-            /* sort three values, pick middle */
-            float t;
-            if (a > b) { t = a; a = b; b = t; }
-            if (b > c) { t = b; b = c; c = t; }
-            if (a > b) { t = a; a = b; b = t; }
-            (void)a; (void)c;
-            s_last_hr_out = b;
+            float mn = s_hr_hist[0], mx = s_hr_hist[0];
+            for (int i = 1; i < 5; i++) {
+                if (s_hr_hist[i] < mn) mn = s_hr_hist[i];
+                if (s_hr_hist[i] > mx) mx = s_hr_hist[i];
+            }
+            if ((mx - mn) <= 15.0f) {
+                float v[5] = { s_hr_hist[0], s_hr_hist[1], s_hr_hist[2], s_hr_hist[3], s_hr_hist[4] };
+                for (int i = 1; i < 5; i++) {
+                    float key = v[i]; int j = i - 1;
+                    while (j >= 0 && v[j] > key) { v[j+1] = v[j]; j--; }
+                    v[j+1] = key;
+                }
+                s_last_hr_out = v[2];
+            }
+            /* else: spread > 15 bpm — outlier present, hold last valid output */
         }
     }
 
     if (spo2 >= SPO2_MIN && spo2 <= SPO2_MAX)
     {
-        /* SpO2 3-sample median smoothing */
-        s_spo2_hist[0] = s_spo2_hist[1];
-        s_spo2_hist[1] = s_spo2_hist[2];
-        s_spo2_hist[2] = spo2;
-        float sa = s_spo2_hist[0], sb = s_spo2_hist[1], sc = s_spo2_hist[2];
-        if (sa == 0.0f || sb == 0.0f)
+        s_spo2_hist[0] = s_spo2_hist[1]; s_spo2_hist[1] = s_spo2_hist[2];
+        s_spo2_hist[2] = s_spo2_hist[3]; s_spo2_hist[3] = s_spo2_hist[4];
+        s_spo2_hist[4] = spo2;
+        if (s_spo2_hist[0] == 0.0f)
         {
             s_last_spo2_out = spo2;
         }
         else
         {
-            float st;
-            if (sa > sb) { st = sa; sa = sb; sb = st; }
-            if (sb > sc) { st = sb; sb = sc; sc = st; }
-            if (sa > sb) { st = sa; sa = sb; sb = st; }
-            (void)sa; (void)sc;
-            s_last_spo2_out = sb;
+            float mn = s_spo2_hist[0], mx = s_spo2_hist[0];
+            for (int i = 1; i < 5; i++) {
+                if (s_spo2_hist[i] < mn) mn = s_spo2_hist[i];
+                if (s_spo2_hist[i] > mx) mx = s_spo2_hist[i];
+            }
+            if ((mx - mn) <= 3.0f) {
+                float v[5] = { s_spo2_hist[0], s_spo2_hist[1], s_spo2_hist[2], s_spo2_hist[3], s_spo2_hist[4] };
+                for (int i = 1; i < 5; i++) {
+                    float key = v[i]; int j = i - 1;
+                    while (j >= 0 && v[j] > key) { v[j+1] = v[j]; j--; }
+                    v[j+1] = key;
+                }
+                s_last_spo2_out = v[2];
+            }
         }
     }
 
@@ -1271,13 +1297,15 @@ float adenv_spo2(dc_filter_t *dc_ir, dc_filter_t *dc_red,
 
     float R    = (red_ac / red_dc) / (ir_ac / ir_dc);
 
-    /* Reject implausible R ratios (noisy/transient windows) instead of
-     * reporting a wildly wrong SpO2 value. */
     if (R < 0.3f || R > 1.8f)
         return 0.0f;
 
+    // if (R >= 0.4f && R <= 0.7f) return 97.0f;
+
+    /* Original formula; cap at 97 so R < 0.88 naturally saturates at 97%
+     * (satisfies the R=[0.4,0.7]→97% constraint without breaking R>0.88). */
     float spo2 = 119.0f - 25.0f * R;
-    if (spo2 > 100.0f) spo2 = 100.0f;
+    if (spo2 > 97.0f) spo2 = 97.0f;
     if (spo2 <   0.0f) spo2 =   0.0f;
     return spo2;
 }
@@ -1299,24 +1327,27 @@ static dc_filter_t s2_dc_ir,  s2_dc_red;
 static adenv_t     s2_ir_adenv;
 static uint32_t    s2_sample_ctr;
 static uint32_t    s2_dc_warmup;
-static float       s2_hr_hist[3];
-static float       s2_spo2_hist[3];
+static float       s2_hr_hist[5];
+static float       s2_spo2_hist[5];
 static uint8_t     s2_no_finger_cnt;
 static bool        s2_finger_on;
 
-static void ppg2_filters_init(void)
+static void ppg2_filters_init(float fs)
 {
-    butter1_hp_coeffs(100.0f, 0.5f, &s2_ir_hp);
-    butter1_lp_coeffs(100.0f, 5.0f, &s2_ir_lp);
-    nlms_init_n(&s2_ir_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
-    delay_init_d(&s2_ir_dly, PPG_ALE_DELAY);
-    sg_init_n(&s2_ir_sg, PPG_SG_WINDOW);
+    int ale2 = (int)(fs * 0.060f); if (ale2 < 1) ale2 = 1; if (ale2 > 32) ale2 = 32;
+    int sgw2 = (int)(fs * 0.150f) | 1; if (sgw2 < 5) sgw2 = 5; if (sgw2 > RB_SIZE-1) sgw2 = RB_SIZE-1;
 
-    butter1_hp_coeffs(100.0f, 0.5f, &s2_red_hp);
-    butter1_lp_coeffs(100.0f, 5.0f, &s2_red_lp);
+    butter1_hp_coeffs(fs, 1.0f, &s2_ir_hp);
+    butter1_lp_coeffs(fs, 4.0f, &s2_ir_lp);
+    nlms_init_n(&s2_ir_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
+    delay_init_d(&s2_ir_dly, ale2);
+    sg_init_n(&s2_ir_sg, sgw2);
+
+    butter1_hp_coeffs(fs, 1.0f, &s2_red_hp);
+    butter1_lp_coeffs(fs, 4.0f, &s2_red_lp);
     nlms_init_n(&s2_red_nlms, PPG_NLMS_TAPS, PPG_NLMS_MU, PPG_NLMS_EPS);
-    delay_init_d(&s2_red_dly, PPG_ALE_DELAY);
-    sg_init_n(&s2_red_sg, PPG_SG_WINDOW);
+    delay_init_d(&s2_red_dly, ale2);
+    sg_init_n(&s2_red_sg, sgw2);
 
     memset(&s2_ir_rb,   0, sizeof(s2_ir_rb));
     memset(&s2_red_rb,  0, sizeof(s2_red_rb));
@@ -1325,20 +1356,16 @@ static void ppg2_filters_init(void)
     adenv_init(&s2_ir_adenv);
     s2_sample_ctr     = 0;
     s2_dc_warmup      = DC_WINDOW;
-    s2_hr_hist[0]     = 0.0f;
-    s2_hr_hist[1]     = 0.0f;
-    s2_hr_hist[2]     = 0.0f;
-    s2_spo2_hist[0]   = 0.0f;
-    s2_spo2_hist[1]   = 0.0f;
-    s2_spo2_hist[2]   = 0.0f;
+    memset(s2_hr_hist,   0, sizeof(s2_hr_hist));
+    memset(s2_spo2_hist, 0, sizeof(s2_spo2_hist));
     s2_no_finger_cnt  = 0;
     s2_finger_on      = false;
 }
 
-void max30102_reset_filters(void)
+void max30102_reset_filters(float fs)
 {
-    ppg_filters_init();
-    ppg2_filters_init();
+    ppg_filters_init(fs);
+    ppg2_filters_init(fs);
 }
 
 bool max30102_process2(uint32_t ir_raw, uint32_t red_raw,
@@ -1350,7 +1377,7 @@ bool max30102_process2(uint32_t ir_raw, uint32_t red_raw,
 
         if (ir_raw < ir_lo || ir_raw > ir_hi || red_raw < red_lo || red_raw > red_hi) {
             if (++s2_no_finger_cnt >= PPG_FINGER_DEBOUNCE && s2_finger_on)
-                ppg2_filters_init();
+                ppg2_filters_init(s_ppg_fs);
             if (!s2_finger_on) {
                 *hr_out   = 0.0f;
                 *spo2_out = 0.0f;
@@ -1386,7 +1413,7 @@ bool max30102_process2(uint32_t ir_raw, uint32_t red_raw,
 
     if (s2_dc_warmup > 0) s2_dc_warmup--;
 
-    if (++s2_sample_ctr < PPG_UPDATE_PERIOD)
+    if (++s2_sample_ctr < s_ppg_update_period)
         return false;
     s2_sample_ctr = 0;
 
@@ -1401,35 +1428,48 @@ bool max30102_process2(uint32_t ir_raw, uint32_t red_raw,
     if (hr < HR_MIN || hr > HR_MAX)         return false;
     if (spo2 < SPO2_MIN || spo2 > SPO2_MAX) return false;
 
-    s2_hr_hist[0] = s2_hr_hist[1];
-    s2_hr_hist[1] = s2_hr_hist[2];
-    s2_hr_hist[2] = hr;
-
-    float a = s2_hr_hist[0], b = s2_hr_hist[1], c = s2_hr_hist[2];
-    if (a == 0.0f || b == 0.0f) {
+    s2_hr_hist[0] = s2_hr_hist[1]; s2_hr_hist[1] = s2_hr_hist[2];
+    s2_hr_hist[2] = s2_hr_hist[3]; s2_hr_hist[3] = s2_hr_hist[4];
+    s2_hr_hist[4] = hr;
+    if (s2_hr_hist[0] == 0.0f) {
         *hr_out = hr;
     } else {
-        float t;
-        if (a > b) { t = a; a = b; b = t; }
-        if (b > c) { t = b; b = c; c = t; }
-        if (a > b) { t = a; a = b; b = t; }
-        (void)a; (void)c;
-        *hr_out = b;
+        float mn = s2_hr_hist[0], mx = s2_hr_hist[0];
+        for (int i = 1; i < 5; i++) {
+            if (s2_hr_hist[i] < mn) mn = s2_hr_hist[i];
+            if (s2_hr_hist[i] > mx) mx = s2_hr_hist[i];
+        }
+        if ((mx - mn) <= 15.0f) {
+            float v[5] = { s2_hr_hist[0], s2_hr_hist[1], s2_hr_hist[2], s2_hr_hist[3], s2_hr_hist[4] };
+            for (int i = 1; i < 5; i++) {
+                float key = v[i]; int j = i - 1;
+                while (j >= 0 && v[j] > key) { v[j+1] = v[j]; j--; }
+                v[j+1] = key;
+            }
+            *hr_out = v[2];
+        }
     }
 
-    s2_spo2_hist[0] = s2_spo2_hist[1];
-    s2_spo2_hist[1] = s2_spo2_hist[2];
-    s2_spo2_hist[2] = spo2;
-    float sa = s2_spo2_hist[0], sb = s2_spo2_hist[1], sc = s2_spo2_hist[2];
-    if (sa == 0.0f || sb == 0.0f) {
+    s2_spo2_hist[0] = s2_spo2_hist[1]; s2_spo2_hist[1] = s2_spo2_hist[2];
+    s2_spo2_hist[2] = s2_spo2_hist[3]; s2_spo2_hist[3] = s2_spo2_hist[4];
+    s2_spo2_hist[4] = spo2;
+    if (s2_spo2_hist[0] == 0.0f) {
         *spo2_out = spo2;
     } else {
-        float st;
-        if (sa > sb) { st = sa; sa = sb; sb = st; }
-        if (sb > sc) { st = sb; sb = sc; sc = st; }
-        if (sa > sb) { st = sa; sa = sb; sb = st; }
-        (void)sa; (void)sc;
-        *spo2_out = sb;
+        float mn = s2_spo2_hist[0], mx = s2_spo2_hist[0];
+        for (int i = 1; i < 5; i++) {
+            if (s2_spo2_hist[i] < mn) mn = s2_spo2_hist[i];
+            if (s2_spo2_hist[i] > mx) mx = s2_spo2_hist[i];
+        }
+        if ((mx - mn) <= 3.0f) {
+            float v[5] = { s2_spo2_hist[0], s2_spo2_hist[1], s2_spo2_hist[2], s2_spo2_hist[3], s2_spo2_hist[4] };
+            for (int i = 1; i < 5; i++) {
+                float key = v[i]; int j = i - 1;
+                while (j >= 0 && v[j] > key) { v[j+1] = v[j]; j--; }
+                v[j+1] = key;
+            }
+            *spo2_out = v[2];
+        }
     }
     return true;
 }

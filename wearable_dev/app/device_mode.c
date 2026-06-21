@@ -24,21 +24,19 @@ volatile bool    g_periodic_sleeping      = false;
 /* ── Sensor polling timer ── */
 APP_TIMER_DEF(m_sensor_timer);
 
-#define SENSOR_TIMER_MS   10            /* base tick = 10 ms */
+static uint16_t s_tick_ms = 10;         /* current sensor tick interval (ms) */
 
-/* PERIODIC duty cycle: capture for s_capture_ticks (full 10 ms rate), then
+/* PERIODIC duty cycle: capture for s_capture_ticks (full tick rate), then
  * idle for s_sleep_ticks (no sensor reads), repeating. */
-static bool     s_in_capture    = true;   /* PERIODIC starts by capturing */
+static bool     s_in_capture    = true;
 static uint32_t s_phase_ticks   = 0;
-static uint32_t s_capture_ticks = 1;      /* g_capture_ms / 10                 */
-static uint32_t s_sleep_ticks   = 0;      /* (g_period_ms - g_capture_ms) / 10 */
+static uint32_t s_capture_ticks = 1;
+static uint32_t s_sleep_ticks   = 0;
 
-/* Derive the capture/sleep tick counts from g_period_ms / g_capture_ms.
- * Clamps capture ≤ period; if cycle ≤ capture, sleep = 0 (never sleeps). */
 static void periodic_recompute(void)
 {
-    uint32_t cap = (g_capture_ms + SENSOR_TIMER_MS - 1) / SENSOR_TIMER_MS;
-    uint32_t cyc = (g_period_ms  + SENSOR_TIMER_MS - 1) / SENSOR_TIMER_MS;
+    uint32_t cap = (g_capture_ms + s_tick_ms - 1) / s_tick_ms;
+    uint32_t cyc = (g_period_ms  + s_tick_ms - 1) / s_tick_ms;
     if (cap < 1)   { cap = 1; }
     if (cap > cyc) { cap = cyc; }
     s_capture_ticks = cap;
@@ -113,15 +111,28 @@ void device_mode_init(void)
     s_in_capture  = true;
     s_phase_ticks = 0;
 
-    /* Start base timer (10 ms, repeating) */
     APP_ERROR_CHECK(app_timer_create(&m_sensor_timer, APP_TIMER_MODE_REPEATED, sensor_timer_cb));
-    APP_ERROR_CHECK(app_timer_start(m_sensor_timer, APP_TIMER_TICKS(SENSOR_TIMER_MS), NULL));
+    APP_ERROR_CHECK(app_timer_start(m_sensor_timer, APP_TIMER_TICKS(s_tick_ms), NULL));
 
     apply_ble_interval(g_device_mode);
 
     NRF_LOG_INFO("device_mode_init: mode=%d period=%d ms capture=%d ms",
                  g_device_mode, g_period_ms, g_capture_ms);
     NRF_LOG_FLUSH();
+}
+
+uint16_t device_mode_get_tick_ms(void)
+{
+    return s_tick_ms;
+}
+
+void device_mode_set_tick_ms(uint16_t ms)
+{
+    if (ms == 0 || ms == s_tick_ms) return;
+    s_tick_ms = ms;
+    periodic_recompute();
+    app_timer_stop(m_sensor_timer);
+    APP_ERROR_CHECK(app_timer_start(m_sensor_timer, APP_TIMER_TICKS(s_tick_ms), NULL));
 }
 
 void device_mode_set(device_mode_t mode)

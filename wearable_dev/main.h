@@ -28,20 +28,26 @@
 #define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 11)   /* P0.11 BLK */
 /* Accelerometer INT1 (MMA8452Q) */
 #define MMA8452Q_INT1_PIN   NRF_GPIO_PIN_MAP(0, 31)   /* TODO: confirm on 52840 board */
+/* SPI — SPIM3 is the only nRF52840 instance capable of >8 Mbps */
+#define LCD_SPI_INSTANCE    3
+#define LCD_SPI_FREQ        NRF_SPIM_FREQ_32M
 #else
 /* ── nRF52832 (pca10040) — all pins must be Port 0 (0–31) ── */
 /* I2C (TWI1) — MAX30102 / MMA8452Q / TMP117, 400 kHz */
 #define TWI_SCL_PIN         NRF_GPIO_PIN_MAP(0, 29)   /* P0.29 SCL */
 #define TWI_SDA_PIN         NRF_GPIO_PIN_MAP(0, 28)   /* P0.28 SDA */
 /* Display (SPI0 + GPIO) — GC9A01 240×240 LCD */
-#define LCD_MOSI_PIN        NRF_GPIO_PIN_MAP(0, 30)   /* P0.30 SDA_LCD */
-#define LCD_SCK_PIN         NRF_GPIO_PIN_MAP(0, 31)   /* P0.31 SCL_LCD */
-#define LCD_CS_Pin          NRF_GPIO_PIN_MAP(0, 26)   /* P0.26 CS  */
-#define LCD_DC_Pin          NRF_GPIO_PIN_MAP(0, 27)   /* P0.27 DC  */
-#define LCD_RES_Pin         NRF_GPIO_PIN_MAP(0, 3)    /* P0.03 RES */
-#define LCD_BLK_Pin         NRF_GPIO_PIN_MAP(0, 25)   /* P0.25 BLK */
+#define LCD_MOSI_PIN        13
+#define LCD_SCK_PIN         12
+#define LCD_CS_Pin          16
+#define LCD_DC_Pin          15
+#define LCD_RES_Pin         14
+#define LCD_BLK_Pin         17
 /* Accelerometer INT1 (MMA8452Q) */
-#define MMA8452Q_INT1_PIN   NRF_GPIO_PIN_MAP(0, 27)   /* P0.27 */
+#define MMA8452Q_INT1_PIN   NRF_GPIO_PIN_MAP(0, 30)   /* P0.27 */
+/* SPI — nRF52832 has SPIM0/1/2 only, max 8 MHz */
+#define LCD_SPI_INSTANCE    0
+#define LCD_SPI_FREQ        NRF_SPIM_FREQ_4M
 #endif
 
 #define LCD_MISO_PIN        NRF_SPI_PIN_NOT_CONNECTED

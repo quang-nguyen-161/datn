@@ -1,4 +1,4 @@
-# LCD Dashboard — GC9A01 Layout Reference (Layout V3)
+# LCD Dashboard — GC9A01 Layout Reference (Layout V4)
 
 Reference for the round 240×240 GC9A01 dashboard (`drivers/display/dashboard.c/h`,
 `drivers/display/GC9A01.c/h`). Intended as a map of the current layout plus
@@ -23,17 +23,17 @@ notes for adding/rearranging widgets.
 
 ---
 
-## 2. Row layout (current, V3)
+## 2. Row layout (current, V4)
 
 ```
                  ┌─────────────────────────┐
    y=8..52       │  Row 1: BLE status bar    │  line1: status+battery, line2: address+signal bars
                  ├─────────────┬─────────────┤
-   y=63..116     │ Row 2: Temp │ Row 2: SpO2 │  divider x=120
-                 ├─────────────┼─────────────┤
-   y=118..176    │ Row 3: Steps│ Row 3: HR   │  divider x=120 (50/50)
-                 ├─────────────┴─────────────┤
-   y=180..~232   │ Row 4: ECG + ON/OFF badge  │
+   y=63..116     │ Row 2: Temp │ Row 2: SpO2 │  divider x=120, bigger (Font20) numbers
+                 ├─────────────────────────┤
+   y=118..176    │ Row 3: HR sweep (left, fills row) | HR number (right, bigger) │
+                 ├─────────────────────────┤
+   y=180..~232   │ Row 4: ECG label+ON/OFF (left) | ECG sweep | ECG-HR number (right, bigger) │
                  └─────────────────────────┘
 ```
 
@@ -50,7 +50,10 @@ Vertical dividers:
 | x | y range | purpose |
 |---|---|---|
 | 120 | 63–116  | Temp \| SpO2 (Row 2) |
-| 120 | 118–176 | Steps \| HR (Row 3, 50/50) |
+
+Row 3 and Row 4 no longer have a vertical divider — the HR/ECG number columns
+sit on the right with no hard boundary; the sweep chart simply fills whatever
+space is left of them.
 
 ---
 
@@ -87,9 +90,9 @@ Redraw is gated:
 | Element | Position | Notes |
 |---|---|---|
 | Thermometer icon | `draw_thermometer(32, 78, CYAN)` | static, drawn once in `init_layout` |
-| "°C" unit label | `(82, 70)` Font12, LIGHT_GRAY | static |
-| Value (e.g. "36.5") | `fill_rect(44,66,36,18)` then `(46,68)` Font16 | redraws only if `temp_x10` changed. Color via `get_temp_colors()`. |
-| Sweep area chart | `sweep_area_chart(25, 115, 90, 25, ...)`, range `[350,395]` (35.0–39.5°C) | persistent state `tmp_dx/tmp_py` |
+| "°C" unit label | `(98, 70)` Font12, LIGHT_GRAY | static — moved right to clear the wider Font20 value |
+| Value (e.g. "36.5") | `fill_rect(38,62,62,22)` then `(40,63)` Font20 | redraws only if `temp_x10` changed. Color via `get_temp_colors()`. |
+| Sweep area chart | `sweep_area_chart(25, 115, 90, 25, ...)`, range `[350,395]` (35.0–39.5°C) | persistent state `tmp_dx/tmp_py`, unchanged from V3 |
 
 `get_temp_colors(t)` (t = temp×10): `<35.5 or ≥38.5` → red, `≥37.6` → yellow,
 else cyan.
@@ -99,65 +102,49 @@ else cyan.
 | Element | Position | Notes |
 |---|---|---|
 | Droplet icon | `draw_droplet(140, 72, 8, SOFT_GREEN)` | static |
-| Value + "%" | `fill_rect(155,66,55,18)` → `(157,68)` Font16 number, `%` at `px = 157 + (≥100?33:22) + 2` Font12 | redraws on `spo2_val` change |
-| Sweep bar chart | `sweep_bar_chart(125, 115, 90, 25, ..., nb=18)`, range `[85,100]` | persistent `spo2_idx` |
+| Value + "%" | `fill_rect(150,62,65,22)` → `(152,64)` Font20 number, `%` at `px = 152 + (≥100?42:28) + 2` Font12 | redraws on `spo2_val` change |
+| Sweep bar chart | `sweep_bar_chart(125, 115, 90, 25, ..., nb=18)`, range `[85,100]` | persistent `spo2_idx`, unchanged from V3 |
 
 `get_spo2_colors(v)`: `<90` red, `≤94` yellow, else green.
 
-### Row 3 Left — Steps / Activity (`dashboard_update_steps`, compact)
+### Row 3 — HR (`dashboard_update_hr`)
+
+Steps/activity (V3's Row 3 left half) was **removed** — `dashboard_update_steps()`,
+`draw_step_icon()`'s activity-tinted call site, `detect_activity()`, and the
+step/cadence fields in `dashboard_data_t` are gone. The pedometer itself
+(`pedometer_update()`, `g_sensor.steps`/`cadence` in `main.c`) still runs, it's
+just no longer fed to the LCD. The freed space now belongs to a widened HR
+sweep chart; the HR number moved into a column on the right.
 
 | Element | Position | Notes |
 |---|---|---|
-| Step icon | `draw_step_icon(33, 132, act_color)` | dynamic — color follows activity (drawn fresh each update, not static) |
-| Step count | `(43, 122)` Font16, color = activity color | |
-| Activity name | `(28, 148)` Font12, color = activity color | "REST"/"MOVING"/"WALK"/"F.WALK"/"RUN" |
-
-Clear rect before redraw: `fill_rect(20, 118, 88, 42, DARK_BG)`.
-Whole widget only redraws when `d->steps != last_steps_disp` (early return otherwise).
-Distance and the 5000-step progress bar from V2 were **removed** — no longer
-displayed. `s_prev_steps` is retained solely for `detect_activity()`'s
-`stepping = (steps > prev)` check.
-
-Activity classification (`detect_activity`) uses `ac_value` (accel AC component)
-and `cadence`:
-- `ac < 0.05 && !stepping` → REST
-- `!stepping` → MOVING
-- `cadence < 120` → WALK, `<150` → F.WALK, `≥150` → RUN
-
-> **Caveat**: `ac_value` comes from `g_accel.ac`, which per
-> [SENSOR_ALGORITHMS.md](SENSOR_ALGORITHMS.md) §4.2 is currently **always 0**
-> (the accel filter that would populate it is never called). So REST/MOVING
-> split is effectively dead — activity is driven almost entirely by `cadence`.
-> Fix `g_accel.ac` first if you want REST vs. MOVING to actually work.
-
-### Row 3 Right — HR (`dashboard_update_hr`, first half)
-
-| Element | Position | Notes |
-|---|---|---|
-| Heart icon | `draw_heart(130, 122, 6, SOFT_RED)` | static |
-| "bpm" label | `(180, 120)` Font12, LIGHT_GRAY | static |
-| HR number | `fill_rect(140,118,38,16)` → `(142,118)` Font16 | redraws on `hr_val` change. Color via `get_hr_colors()`. |
-| Sweep area chart | `sweep_area_chart(124, 175, 90, 35, ...)`, range `[40,150]` bpm | persistent `hr_dx/hr_py`. When `hr_valid` is false, the chart rect `(124,140,90,35)` is cleared once and `hr_dx` set to `-1` (idle sentinel) so a stale (possibly red) trace doesn't linger; resets to `0` when HR becomes valid again. |
+| Heart icon | `draw_heart(155, 128, 6, SOFT_RED)` | static, right column |
+| "bpm" label | `(164, 142)` Font12, LIGHT_GRAY | static, right column |
+| HR number | `fill_rect(160,118,50,22)` → `(162,119)` **Font20** | redraws on `hr_val` change. Color via `get_hr_colors()`. |
+| "SAT!" blink badge | `fill_rect(148,156,65,18)`, `dashboard_update_sat_badge()` | moved down/left to stay clear of the bigger number; unrelated to this layout pass otherwise |
+| Sweep area chart | `sweep_area_chart(20, 176, 125, 50, ...)`, range `[40,150]` bpm | **widened** to `w=125,h=50` (was `90×35`) to fill the space freed by removing Steps. persistent `hr_dx/hr_py`. When `hr_valid` is false, the chart rect `(20,126,125,50)` is cleared once and `hr_dx` set to `-1` (idle sentinel) so a stale (possibly red) trace doesn't linger; resets to `0` when HR becomes valid again. |
 
 `get_hr_colors(v)`: `<51 or >130` → red, `≥100` → yellow, else green.
 
-### Row 4 — ECG + ON/OFF badge (`dashboard_update_ecg`)
+### Row 4 — ECG + ON/OFF badge + ECG-derived HR number (`dashboard_update_ecg`)
 
 | Element | Position | Notes |
 |---|---|---|
 | "ECG" label | `(24, 184)` Font12, SOFT_RED | static |
-| ON/OFF badge | `(185, 184)` Font12 | "ON" (SOFT_GREEN) / "OFF" (LIGHT_GRAY), redraws only when `d->ecg_enabled` changes vs `last_ecg_enabled`. Clear rect `(180,184,30,12)`. |
-| Sweep line | `sweep_line(62, 220, 116, 28, ...)`, range `[0,1000]`, color SOFT_RED | only drawn/updated while `d->ecg_enabled` is true. Input `ecg_val` pre-scaled: `ecg_val * 1000 / 4095`. persistent `ecg_dx/ecg_py`. |
+| ON/OFF badge | `(58, 184)` Font12 | **moved left**, next to the "ECG" label, to make room for the number on the right. "ON" (SOFT_GREEN) / "OFF" (LIGHT_GRAY), redraws only when `d->ecg_enabled` changes vs `last_ecg_enabled`. Clear rect `(55,184,32,12)`. |
+| Sweep line | `sweep_line(62, 206, 88, 14, ...)`, range `[0,1000]`, color SOFT_RED | **narrowed** to `w=88` (was `116`) to leave room for the HR number. Only drawn/updated while `d->ecg_enabled` is true. Input `ecg_val` pre-scaled: `ecg_val * 1000 / 4095`. persistent `ecg_dx/ecg_py`. |
+| "bpm" label | `(153, 201)` Font12, LIGHT_GRAY | static, right column |
+| ECG-derived HR number | `fill_rect(150,178,50,22)` → `(152,179)` **Font20** | new in V4. Source: `d->hr_ecg`/`d->hr_ecg_valid`, wired in `main.c` from `g_sensor.hr_ecg`/`g_sensor.hr_ecg_valid` (gated on `g_ecg_stream_enabled`). Color via `get_hr_colors()` (reuses the PPG-HR bpm thresholds — no separate ECG-HR threshold exists). |
 
-When `d->ecg_enabled` is false, the sweep rect `(62,192,116,28)` is cleared
-once and `ecg_dx` set to `-1` (idle sentinel, same pattern as the Row3-right
-HR chart) so no stale trace lingers; resets to `0`/`220` when ECG turns back
+When `d->ecg_enabled` is false, the sweep rect `(62,192,88,28)` is cleared
+once and `ecg_dx` set to `-1` (idle sentinel, same pattern as the Row3 HR
+chart) so no stale trace lingers; resets to `0`/`206` when ECG turns back
 on. `d->ecg_enabled` is copied from `g_ecg_stream_enabled` (cmd.h) by
 `main.c` each tick before calling `dashboard_update_ecg()`.
 
-> Sweep rect is 116×28, not full-row-width — the bezel curve at y≈220-222
-> only allows ~115-121px of width with margin, after accounting for the
-> label/badge row above.
+> Sweep rect is now 88×28, narrower than V3's 116×28 — the right column needs
+> the room, and the bezel curve at y≈220-222 already constrained the old
+> width to begin with (see §7 checklist note on bezel math).
 
 Note: `ecg_synthetic()` exists in the file (generates a fake ECG waveform from
 HR) but is **not currently wired up** — `dashboard_update_ecg` is called with
@@ -191,13 +178,13 @@ the SpO2 color thresholds as a placeholder.
 ## 5. Persistent state (must reset in `dashboard_init_layout`)
 
 ```c
-static int16_t hr_dx=0, hr_py=170;
+static int16_t hr_dx=0, hr_py=176;
 static int16_t tmp_dx=0, tmp_py=110;
 static int16_t spo2_idx=0;
-static int16_t ecg_dx=0, ecg_py=220;
+static int16_t ecg_dx=0, ecg_py=206;
 static uint8_t  last_hr=255, last_spo2=255;
 static uint16_t last_temp=0xFFFF;
-static uint32_t last_steps_disp=0xFFFFFFFF;
+static uint8_t  last_hr_ecg=255;
 static int8_t   last_rssi=1;
 static bool     last_ble_conn=false;
 static char     last_device_name[16] = "";
@@ -223,9 +210,9 @@ update after `SLPIN`/wake always redraws.
 ```
 max30102_process()       → s_dash.hr, s_dash.spo2     → dashboard_update_hr()
 MMA8452Q_read()
-  + pedometer_update()    → s_dash.steps, s_dash.cadence
-g_ecg_stream_enabled      → s_dash.ecg_enabled         → dashboard_update_steps()
-                                                        → dashboard_update_ecg()
+  + pedometer_update()    → g_sensor.steps, cadence    (no longer fed to the LCD)
+g_ecg_stream_enabled      → s_dash.ecg_enabled,
+  + R-peak HR              s_dash.hr_ecg/hr_ecg_valid  → dashboard_update_ecg()
 TMP117 one-shot state machine
   → g_sensor.temp, temp_valid                          → dashboard_update_temp()
 (BLE event handlers)       → s_dash.rssi, ble_connected,
@@ -269,9 +256,6 @@ changed sub-rectangle).
 
 ## 8. Known issues / future-dev notes
 
-- `g_accel.ac` dead-code issue (see §3 Row 3 Left caveat and
-  [SENSOR_ALGORITHMS.md](SENSOR_ALGORITHMS.md) §4.2) — fix to make REST vs.
-  MOVING activity detection meaningful.
 - `ecg_synthetic()` is unused dead code — either remove or repurpose as a
   fallback waveform when ECG is disabled (now that Row 4 has an ON/OFF state,
   this could drive a demo waveform while `ecg_enabled` is false).

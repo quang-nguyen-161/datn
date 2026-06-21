@@ -38,7 +38,7 @@ LCD backlight is plain GPIO on/off on `LCD_BLK_Pin` (`pwm_init()` / `lcd_set_bri
 | Path | Purpose |
 |------|---------|
 | `main.c / main.h` | Top-level init, main loop, vitals BLE send; main.h holds the **board pin map** (per-target `NRF52840_XXAA`/nRF52832 macros) + `sensor_data_t` |
-| `peripheral/peripheral.c/.h` | **All on-chip peripheral init/callbacks/instances**: TWI1 (`twi_init`/`twi_wait`/`m_twi`), SPIM3 (`spi_init`/`m_lcd_spi`, 32 MHz — only nRF52840 SPI instance >8 Mbps), SAADC+PPI+TIMER3 (`adc_init`/`adc_set_sample_us`/`saadc_callback`/`g_ecg_raw`/`g_ecg_ready`), TIMER2 (`timer2_init`/`timer2_now`), LCD backlight GPIO on/off (`pwm_init`/`lcd_set_brightness`) |
+| `peripheral/peripheral.c/.h` | **All on-chip peripheral init/callbacks/instances**: TWI1 (`twi_init`/`twi_wait`/`m_twi`), SPIM0 (`spi_init`/`m_lcd_spi`, 8 MHz — nRF52832 max), SAADC+PPI+TIMER3 (`adc_init`/`adc_set_sample_us`/`saadc_callback`/`g_ecg_raw`/`g_ecg_ready`), TIMER2 (`timer2_init`/`timer2_now`), LCD backlight GPIO on/off (`pwm_init`/`lcd_set_brightness`) |
 | `ecg/ecg.c` | ECG DSP pipeline + R-peak v1+v2 (calls `adc_init()` from peripheral.c); `hr_ecg_valid` gated by `g_ecg_stream_enabled` |
 | `ecg/ecg.h` | `ecg_init()`, `ecg_process()`, ECG result struct |
 | `cmd/cmd.c` | Gateway RX command parser — CMD_ECG_CFG / CMD_THR / CMD_PPG_CFG / CMD_VITAL_CFG / CMD_NAME_CFG |
@@ -52,7 +52,7 @@ LCD backlight is plain GPIO on/off on `LCD_BLK_Pin` (`pwm_init()` / `lcd_set_bri
 | `drivers/accel/mma845.c/h` | MMA8452Q I2C driver |
 | `drivers/accel/pedometer.c/h` | Dynamic-threshold step counter, cadence EMA |
 | `drivers/display/GC9A01.c/h` | GC9A01 LCD driver (SPI0 bus via `spi_init()` in peripheral.c; LCD GPIO + draw ops here) |
-| `drivers/display/dashboard.c/h` | 4-row UI layout V3: Row1 BLE status + battery icon / Row2 Temp+SpO2 / Row3 Steps+HR / Row4 ECG + ON/OFF badge. See [LCD_DASHBOARD.md](LCD_DASHBOARD.md) |
+| `drivers/display/dashboard.c/h` | 4-row UI layout V4: Row1 BLE status + battery icon / Row2 Temp+SpO2 (bigger numbers) / Row3 HR sweep+bigger number (right) / Row4 ECG sweep+ON/OFF badge+bigger ECG-HR number (right). See [LCD_DASHBOARD.md](LCD_DASHBOARD.md) |
 | `drivers/temp/tmp117_v2.c/h` | TMP117 I2C driver (one-shot mode, 200 ms conversion) |
 | `drivers/temp/temp_filter.c/h` | median(3) + rate-limit + EMA(α=0.3) temperature smoother |
 | `storage/flash_user.c/h` | FDS-based persistent config (device mode, period) |
@@ -131,8 +131,8 @@ while (1) {
   [sensor tick — every 10 ms]
     ① apply pending config (cmd pending flags)
     ② MAX30102: read 1 sample → max30102_process() → g_sensor.hr_ppg / spo2 (+ s_dash.hr_valid=true → dashboard_update_hr())
-    ③ MMA8452Q: read → pedometer_update() → g_sensor.steps / cadence
-    ④ LCD: s_dash.ecg_enabled = g_ecg_stream_enabled; dashboard_update_steps() / dashboard_update_ecg()
+    ③ MMA8452Q: read → pedometer_update() → g_sensor.steps / cadence (not shown on LCD anymore)
+    ④ LCD: s_dash.ecg_enabled = g_ecg_stream_enabled; s_dash.hr_ecg/hr_ecg_valid from g_sensor; dashboard_update_ecg()
     ⑤ TMP117: one-shot state machine (wake → 200 ms → read → filter) → g_sensor.temp
     ⑥ BLE vitals: send every g_vital_interval_ms (default 1000 ms)
     ⑦ LCD vitals refresh — every g_vital_interval_ms:

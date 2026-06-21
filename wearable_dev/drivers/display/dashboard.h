@@ -5,13 +5,13 @@
 #include <stdbool.h>
 
 /**
- * Dashboard — GC9A01 240x240 display module (Layout V3)
+ * Dashboard — GC9A01 240x240 display module (Layout V4)
  *
  * Layout:
  *   Row 1: BLE Status (device name/MAC + RSSI + signal bars) + battery icon
- *   Row 2: Temperature (left) + SpO2 (right)
- *   Row 3: Steps + Activity (left) + HR number & sweep (right)
- *   Row 4: ECG waveform (full width) + ON/OFF availability badge
+ *   Row 2: Temperature (left) + SpO2 (right) — bigger numbers
+ *   Row 3: HR sweep chart (fills the row) + bigger HR number (right)
+ *   Row 4: ECG sweep + ON/OFF badge (left) + bigger ECG-derived HR number (right)
  */
 
 /* ── Sensor data struct for display ── */
@@ -25,9 +25,6 @@ typedef struct {
                                   * converging — HR/SpO2 show "Cal" instead of "--" */
     float    temperature;
     bool     temp_valid;
-    uint32_t steps;
-    bool     steps_valid;       /* false when accelerometer absent — shows "--" */
-    float    cadence;
     uint32_t timestamp_ms;
 
     /* BLE status — Row 1 */
@@ -43,6 +40,8 @@ typedef struct {
 
     /* ECG stream enable/disable — Row 4 badge + sweep gating */
     bool     ecg_enabled;       /* mirrors g_ecg_stream_enabled */
+    uint8_t  hr_ecg;            /* ECG-derived HR (bpm), shown on Row 4 right */
+    bool     hr_ecg_valid;      /* false while no valid R-peak HR yet — shows "--" */
 } dashboard_data_t;
 
 /* ── API ── */
@@ -68,11 +67,8 @@ void dashboard_update_sat_badge(const dashboard_data_t *d);
 /** Update temperature display (number + sweep chart) */
 void dashboard_update_temp(const dashboard_data_t *d);
 
-/** Update ECG ON/OFF badge + sweep line (Row 4, call at ~8 FPS) */
+/** Update ECG ON/OFF badge + sweep line + ECG-derived HR number (Row 4, call at ~8 FPS) */
 void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val);
-
-/** Update steps + activity (Row 3 left, compact) */
-void dashboard_update_steps(const dashboard_data_t *d, float ac_value);
 
 /** Update battery icon (Row 1, outline placeholder until battery_valid) */
 void dashboard_update_battery(const dashboard_data_t *d);

@@ -1,0 +1,253 @@
+<mxfile host="app.diagrams.net" modified="2026-06-16T00:00:00.000Z" agent="Claude" version="21.0.2" type="device">
+  <diagram name="VitalSync Dataflow" id="vitalsync-dataflow">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 1 — Wearable Nodes                           -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L1" value="LAYER 1 — Wearable Nodes"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="40" width="900" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="L1N1" value="&lt;b&gt;Node 1&lt;/b&gt;&lt;br&gt;nRF52832&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ECG (SAADC 250 Hz) · PPG (MAX30102)&lt;br&gt;SpO2 · Temperature (TMP117)&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="75" y="80" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="L1N2" value="&lt;b&gt;Node 2&lt;/b&gt;&lt;br&gt;nRF52832&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ECG · PPG · SpO2 · Temp&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="335" y="80" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="L1NN" value="&lt;b&gt;Node N&lt;/b&gt;&lt;br&gt;nRF52832&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ECG · PPG · SpO2 · Temp&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="595" y="80" width="230" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L1 → L2 -->
+        <mxCell id="A12"
+          value="BLE GATT notify (TX char)  ·  ECG: N×int16 LE / 200 ms  ·  Vitals: 5 bytes / vitalInterval"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+          edge="1" source="L1" target="L2" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 2 — gateway.py · BLE Workers                 -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L2" value="LAYER 2 — gateway.py · BLE Workers  (one thread per node)"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="210" width="900" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="L2W1" value="&lt;b&gt;node_worker&lt;/b&gt;&lt;br&gt;Node 1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="75" y="252" width="230" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="L2W2" value="&lt;b&gt;node_worker&lt;/b&gt;&lt;br&gt;Node 2"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="335" y="252" width="230" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="L2WN" value="&lt;b&gt;node_worker&lt;/b&gt;&lt;br&gt;Node N"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="595" y="252" width="230" height="58" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L2 → L3 -->
+        <mxCell id="A23"
+          value="put('ecg' / 'vitals',  node,  data)"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          edge="1" source="L2" target="L3Q" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 3 — Internal Queue                           -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L3" value="LAYER 3 — Internal Queue"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="380" width="900" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="L3Q"
+          value="&lt;b&gt;publish_q&lt;/b&gt;  (maxsize = 100)&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;items:  ('ecg', node, samples[])  |  ('vitals', node, hr / ppg / spo2 / temp)&lt;/font&gt;"
+          style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="220" y="410" width="460" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L3 → L4 -->
+        <mxCell id="A34"
+          value="get()"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          edge="1" source="L3Q" target="L4PW" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 4 — Publish Worker                           -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L4" value="LAYER 4 — Publish Worker"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="535" width="900" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="L4PW" value="&lt;b&gt;publish_worker&lt;/b&gt;  (daemon thread)"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="220" y="568" width="460" height="48" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L4 → L5 : MQTT telemetry -->
+        <mxCell id="A45a"
+          value="MQTT QoS=0 · v1/gateway/telemetry&lt;br&gt;{ NodeN: [{ts, ecg_batch}] }  /  { NodeN: [{ts, vitals}] }"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.2;entryY=0;entryDx=0;entryDy=0;"
+          edge="1" source="L4PW" target="L5TS" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L4 → L5 : REST connected attr -->
+        <mxCell id="A45b"
+          value="REST POST /SERVER_SCOPE&lt;br&gt;{ connected: true / false }"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.7;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+          edge="1" source="L4PW" target="L5SV" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 5 — ThingsBoard CE                           -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L5" value="LAYER 5 — ThingsBoard CE · c7.hust-2slab.org  (behind Cloudflare)"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="685" width="900" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L5TS"
+          value="&lt;b&gt;Time-series DB&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ecg_batch&lt;br&gt;ecgHeartRate · ppgHeartRate&lt;br&gt;spo2 · temperature&lt;/font&gt;"
+          style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="75" y="725" width="230" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="L5SA"
+          value="&lt;b&gt;Shared Attrs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;thresholds × 24&lt;br&gt;ecgSampleFreq · ppgHrSource&lt;br&gt;vitalInterval · deviceMode · bleAddress&lt;/font&gt;"
+          style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="340" y="725" width="230" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="L5SV"
+          value="&lt;b&gt;Server Attrs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;connected&lt;br&gt;patientName&lt;/font&gt;"
+          style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="605" y="725" width="230" height="95" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L5 → L6 : WebSocket -->
+        <mxCell id="A56a"
+          value="WebSocket wss:// · real-time push"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+          edge="1" source="L5TS" target="L6WS" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow L5 → L6 : REST GET (browser-direct) -->
+        <mxCell id="A56b"
+          value="REST GET · browser-direct&lt;br&gt;(bypasses Cloudflare 403)"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+          edge="1" source="L5SA" target="L6ST" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LAYER 6 — VitalSync Dashboard                      -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="L6" value="LAYER 6 — VitalSync · Next.js 14 · browser  (calls ThingsBoard directly)"
+          style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#333333;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;"
+          vertex="1" parent="1">
+          <mxGeometry x="50" y="893" width="900" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="L6WS" value="&lt;b&gt;useTbWebSocket&lt;/b&gt;&lt;br&gt;WebSocket wss://&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;60 fps flush loop&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="933" width="175" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="L6CH" value="&lt;b&gt;Live Charts&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;ECG · PPG waveform&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="250" y="933" width="175" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="L6VC" value="&lt;b&gt;VitalCard&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;HR · SpO2 · Temp&lt;br&gt;trend arrows&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="440" y="933" width="175" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="L6ST" value="&lt;b&gt;settings.js&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Config UI&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;"
+          vertex="1" parent="1">
+          <mxGeometry x="630" y="933" width="175" height="72" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- CONFIG BACKFLOW — dashed, right side, going up     -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- BF1: settings.js → Shared Attrs -->
+        <mxCell id="BF1"
+          value="REST POST /SHARED_SCOPE&lt;br&gt;thresholds · ecgSampleFreq · ppgHrSource&lt;br&gt;deviceMode · bleAddress · patientName"
+          style="edgeStyle=orthogonalEdgeStyle;dashed=1;dashPattern=8 4;html=1;fontSize=10;strokeColor=#9673a6;fontColor=#9673a6;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;endArrow=block;endFill=1;"
+          edge="1" source="L6ST" target="L5SA" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1030" y="969" />
+              <mxPoint x="1030" y="772" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- BF2: Shared Attrs → publish_worker -->
+        <mxCell id="BF2"
+          value="MQTT push · v1/gateway/attributes&lt;br&gt;{ device, data: {key: val} }"
+          style="edgeStyle=orthogonalEdgeStyle;dashed=1;dashPattern=8 4;html=1;fontSize=10;strokeColor=#82b366;fontColor=#82b366;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;endArrow=block;endFill=1;"
+          edge="1" source="L5SA" target="L4PW" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1075" y="772" />
+              <mxPoint x="1075" y="592" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- BF3: publish_worker → BLE Workers (Layer 2) -->
+        <mxCell id="BF3"
+          value="BLE write_request (RX char)&lt;br&gt;CMD_THR 0xCE · CMD_ECG_CFG 0xCF · CMD_PPG_CFG 0xCD&lt;br&gt;CMD_VITAL_CFG 0xCC · CMD_MODE_CFG 0xCB · CMD_NAME_CFG 0xC9"
+          style="edgeStyle=orthogonalEdgeStyle;dashed=1;dashPattern=8 4;html=1;fontSize=10;strokeColor=#d6b656;fontColor=#d6b656;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;endArrow=block;endFill=1;"
+          edge="1" source="L4PW" target="L2" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1120" y="592" />
+              <mxPoint x="1120" y="267" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LEGEND                                             -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="LEG"
+          value="&lt;b&gt;Legend&lt;/b&gt;&lt;br&gt;&lt;br&gt;⬜ Wearable Nodes — grey&lt;br&gt;🟨 BLE Workers (gateway.py) — yellow&lt;br&gt;🟩 Queue + Publisher — teal / green&lt;br&gt;🟪 ThingsBoard CE — purple&lt;br&gt;🟦 VitalSync Dashboard — blue&lt;br&gt;&lt;br&gt;──  solid arrow = telemetry (upward)&lt;br&gt;╌╌  dashed arrow = config backflow (downward)"
+          style="text;html=1;strokeColor=#666666;fillColor=#ffffff;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;rounded=1;"
+          vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="280" height="210" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

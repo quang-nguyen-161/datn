@@ -202,7 +202,7 @@ int main(void)
     s_lcd_present = lcd_spi_init();
     if (s_lcd_present) {
         GC9A01_init();
-				
+        GC9A01_set_rotation(1);   /* 270° CW — physical mount orientation */
         dashboard_init_layout();
     }
 
@@ -216,7 +216,6 @@ int main(void)
     pedometer_reset(&g_pedometer);
     temp_filter_reset(&g_temp_filter);
     memset(&s_dash, 0, sizeof(s_dash));
-    s_dash.steps_valid = s_accel_present;
 
     device_mode_init();   /* starts m_sensor_timer → drives g_sensor_tick */
 		advertising_start();
@@ -259,15 +258,12 @@ int main(void)
                 s_dash.temperature = temp;
                 s_dash.temp_valid  = true;
 
-                static uint32_t s_test_steps = 0;
-                if ((now_ms / 200) != ((now_ms - 10) / 200)) { s_test_steps++; }
-                s_dash.steps        = s_test_steps;
-                s_dash.steps_valid  = true;
-                s_dash.cadence      = 110.0f;
                 s_dash.timestamp_ms = now_ms;
 
-                s_dash.ecg_enabled = true;
-                uint16_t ecg_disp  = (uint16_t)(500.0f + 450.0f * sinf(t * 6.0f));
+                s_dash.ecg_enabled  = true;
+                s_dash.hr_ecg       = (uint8_t)hr;
+                s_dash.hr_ecg_valid = true;
+                uint16_t ecg_disp   = (uint16_t)(500.0f + 450.0f * sinf(t * 6.0f));
 
                 s_dash.battery_valid = true;
                 s_dash.battery_pct   = (uint8_t)(now_ms / 100) % 101;
@@ -283,7 +279,6 @@ int main(void)
                 {
                     dashboard_update_hr(&s_dash);
                     dashboard_update_temp(&s_dash);
-                    dashboard_update_steps(&s_dash, 1.0f);
                     dashboard_update_ecg(&s_dash, ecg_disp);
                     dashboard_update_battery(&s_dash);
                     dashboard_update_ble_status(&s_dash);
@@ -307,8 +302,9 @@ int main(void)
                 if (!s_ppg_shutdown)
                 {
                     max30102_set_sampling_rate(ppg_hz_to_sr(g_ppg_sample_freq));
-                    max30102_reset_filters();
+                    max30102_reset_filters((float)g_ppg_sample_freq);
                 }
+                device_mode_set_tick_ms(1000U / g_ppg_sample_freq);
             }
             if (g_vital_cfg_pending)
             {
@@ -394,14 +390,13 @@ int main(void)
                 g_sensor.steps   = pedometer_get_steps(&g_pedometer);
                 g_sensor.cadence = pedometer_get_cadence(&g_pedometer, now_ms);
 
-                s_dash.steps        = g_sensor.steps;
-                s_dash.cadence      = g_sensor.cadence;
                 s_dash.timestamp_ms = now_ms;
             }
 							
             if (s_lcd_present && !g_periodic_sleeping) {
-                s_dash.ecg_enabled = g_ecg_stream_enabled;   /* V3: ECG ON/OFF badge + sweep gating */
-                dashboard_update_steps(&s_dash, s_accel_present ? g_accel.ac : 0.0f);
+                s_dash.ecg_enabled  = g_ecg_stream_enabled;   /* V4: ECG ON/OFF badge + sweep gating */
+                s_dash.hr_ecg       = g_sensor.hr_ecg;
+                s_dash.hr_ecg_valid = g_ecg_stream_enabled && g_sensor.hr_ecg_valid;
                 dashboard_update_ecg(&s_dash, s_ecg_display);
             }
 					
@@ -472,7 +467,7 @@ int main(void)
             {
                 static uint32_t s_ble_tick = 0;
 
-                if (++s_ble_tick >= (uint32_t)(g_vital_interval_ms / 10U))
+                if (++s_ble_tick >= (uint32_t)(g_vital_interval_ms / device_mode_get_tick_ms()))
                 {
                     s_ble_tick = 0;
 
@@ -487,7 +482,7 @@ int main(void)
             static uint32_t s_log_tick = 0;
 						
 						
-            if (++s_log_tick >= 100)
+            if (++s_log_tick >= (1000U / device_mode_get_tick_ms()))
             {
                 s_log_tick = 0;
                 NRF_LOG_INFO("--- [STATUS] t=%u ms ---", now_ms);
@@ -539,7 +534,7 @@ int main(void)
             if (s_ppg_present && s_ppg_shutdown)
             {
                 max30102_wakeup();
-                max30102_reset_filters();
+                max30102_reset_filters((float)g_ppg_sample_freq);
                 s_ppg_shutdown = false;
             }
             if (s_lcd_present)

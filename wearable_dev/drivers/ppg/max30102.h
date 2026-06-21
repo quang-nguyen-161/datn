@@ -91,9 +91,10 @@ typedef struct {
 bool max30102_init(void);
 void max30102_shutdown(void);
 void max30102_wakeup(void);
-/* Reset all filter and algorithm state — call after changing LED current
- * so DC/AC re-converge cleanly instead of producing a ~1.25 s SpO2 artifact. */
-void max30102_reset_filters(void);
+/* Reset all filter and algorithm state, recomputing coefficients for fs Hz.
+ * Call after changing the sample rate or LED current so the filter cutoffs
+ * and update period stay correct at the new Fs. */
+void max30102_reset_filters(float fs);
 
 /* Read available FIFO samples into caller-supplied buffers.
  * Returns number of samples read (0 on I2C error or empty FIFO). */

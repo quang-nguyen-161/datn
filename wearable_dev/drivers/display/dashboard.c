@@ -1,11 +1,11 @@
 /**
- * Dashboard — GC9A01 display module for SF7 Slave (Layout V2)
+ * Dashboard — GC9A01 display module for SF7 Slave (Layout V4)
  *
- * Layout V2 changes from V1:
+ * Layout V4:
  *   Row 1: BLE Status Bar (device name/MAC + RSSI + signal icon)
- *   Row 2: Temp (left) + SpO2 (right) — unchanged
- *   Row 3: ECG (left 55%) + HR number & sweep (right 45%)
- *   Row 4: Steps + Activity — unchanged
+ *   Row 2: Temp (left) + SpO2 (right) — bigger numbers
+ *   Row 3: HR sweep chart (fills the row) + bigger HR number (right)
+ *   Row 4: ECG sweep + ON/OFF badge (left) + bigger ECG-derived HR number (right)
  */
 
 #include "dashboard.h"
@@ -32,39 +32,6 @@
 #define DARK_BG     RGB565(15, 15, 20)
 #define CX  120
 #define CY  120
-
-/* ================================================================
- *  ACTIVITY DETECTION (internal)
- * ================================================================ */
-
-typedef enum {
-    ACT_REST, ACT_MOVING, ACT_WALK, ACT_FAST_WALK, ACT_RUN
-} activity_t;
-
-static activity_t s_activity = ACT_REST;
-static uint32_t s_prev_steps = 0;
-
-static const char* act_name(activity_t a) {
-    switch (a) {
-        case ACT_REST:      return "REST";
-        case ACT_MOVING:    return "MOVING";
-        case ACT_WALK:      return "WALK";
-        case ACT_FAST_WALK: return "F.WALK";
-        case ACT_RUN:       return "RUN";
-        default:            return "?";
-    }
-}
-
-static activity_t detect_activity(float ac, float cad, uint32_t steps, uint32_t prev)
-{
-    bool stepping = (steps > prev);
-    if (ac < 0.05f && !stepping) return ACT_REST;
-    if (!stepping)               return ACT_MOVING;
-    if (cad > 0 && cad < 120)   return ACT_WALK;
-    if (cad >= 120 && cad < 150) return ACT_FAST_WALK;
-    if (cad >= 150)              return ACT_RUN;
-    return ACT_WALK;
-}
 
 /* ================================================================
  *  ECG SYNTHETIC
@@ -303,17 +270,16 @@ static void sweep_bar_chart(int16_t x0, int16_t y0, int16_t w, int16_t h,
  *  CHART STATE (persistent across calls)
  * ================================================================ */
 
-/* V2: HR sweep moved to Row 3 right (smaller) */
-static int16_t hr_dx=0, hr_py=170;
+/* V4: HR sweep widened across the freed Row 3 space (number moved right) */
+static int16_t hr_dx=0, hr_py=176;
 static int16_t tmp_dx=0, tmp_py=110;
 static int16_t spo2_idx=0;
-/* V2: ECG narrower (120px); ecg_py centered (chart drawn around y=206, ±14px) */
+/* V4: ECG sweep narrowed to make room for the ECG-derived HR number (right) */
 static int16_t ecg_dx=0, ecg_py=206;
 static uint8_t  last_hr=255;
 static uint8_t  last_spo2=255;
 static uint16_t last_temp=0xFFFF;
-static uint32_t last_steps_disp=0xFFFFFFFF;
-static bool     s_steps_na_shown=false;  /* "--" already drawn for absent accel */
+static uint8_t  last_hr_ecg=255;
 
 /* V2: BLE status cache */
 static int8_t   last_rssi=1;          /* Invalid initial → forces first draw */
@@ -468,9 +434,6 @@ void dashboard_init_layout(void)
     /* Row 2: Vertical divider Temp | SpO2 */
     GC9A01_draw_line(MED_GRAY, 120, 63, 120, 116);
 
-    /* Row 3: Vertical divider Steps | HR (50/50 at x=120) */
-    GC9A01_draw_line(MED_GRAY, 120, 118, 120, 176);
-
     /* ── Row 1: Battery icon placeholder (outline only until battery_valid) ── */
     {
         dashboard_data_t tmp = {0};
@@ -481,27 +444,29 @@ void dashboard_init_layout(void)
     draw_thermometer(32, 78, CYAN);
     GC9A01_set_font(&Font12);
     GC9A01_set_text_color(LIGHT_GRAY);
-    GC9A01_draw_string(82, 70, "oC");
+    GC9A01_draw_string(98, 70, "oC");
 
     /* ── Row 2 Right: SpO2 icon ── */
     draw_droplet(140, 72, 8, SOFT_GREEN);
 
-    /* ── Row 3 Right: HR layout ── */
-    draw_heart(130, 122, 6, SOFT_RED);
+    /* ── Row 3: HR layout — sweep chart fills the row, number stacked on the right ── */
+    draw_heart(155, 128, 6, SOFT_RED);
     GC9A01_set_font(&Font12);
     GC9A01_set_text_color(LIGHT_GRAY);
-    GC9A01_draw_string(180, 120, "bpm");
+    GC9A01_draw_string(164, 142, "bpm");
 
-    /* ── Row 4: ECG label ── */
+    /* ── Row 4: ECG label + ON/OFF badge (left) — number stacked on the right ── */
     GC9A01_set_font(&Font12);
     GC9A01_set_text_color(SOFT_RED);
     GC9A01_draw_string(24, 184, "ECG");
+    GC9A01_set_text_color(LIGHT_GRAY);
+    GC9A01_draw_string(153, 201, "bpm");
 
     /* Clear ECG sweep area — avoid leftover trace from before this redraw */
-    GC9A01_fill_rect(62, 192, 116, 28, DARK_BG);
+    GC9A01_fill_rect(62, 192, 88, 28, DARK_BG);
 
     /* Reset chart sweep indices (display memory is blank after SLPIN) */
-    hr_dx = 0; hr_py = 170;
+    hr_dx = 0; hr_py = 176;
     tmp_dx = 0; tmp_py = 110;
     spo2_idx = 0;
     ecg_dx = 0; ecg_py = 206;
@@ -510,13 +475,12 @@ void dashboard_init_layout(void)
     last_hr = 255;
     last_spo2 = 255;
     last_temp = 0xFFFF;
-    last_steps_disp = 0xFFFFFFFF;
+    last_hr_ecg = 255;
     last_rssi = 1;
     last_ble_conn = !last_ble_conn;  /* Toggle → force BLE status full redraw */
     last_ecg_enabled = !last_ecg_enabled;  /* Toggle → force ECG badge redraw */
     last_battery_valid = true;             /* Invalid vs default false → forces first draw */
     last_battery_pct = 0xFF;
-    s_steps_na_shown = false;
 
     /* Draw "--" placeholders immediately for every dynamic field, so the
      * layout is complete from boot even before sensors are read / detected.
@@ -525,7 +489,7 @@ void dashboard_init_layout(void)
         dashboard_data_t placeholder = {0};
         dashboard_update_hr(&placeholder);     /* HR + SpO2 → "--" */
         dashboard_update_temp(&placeholder);   /* Temp → "--.-" */
-        dashboard_update_steps(&placeholder, 0.0f);  /* Steps → "--" */
+        dashboard_update_ecg(&placeholder, 500);  /* ECG HR → "--" */
     }
 }
 
@@ -621,51 +585,52 @@ void dashboard_update_hr(const dashboard_data_t *d)
     if (d->hr_valid) get_hr_colors(hr_val, &hlc, &hfc, &htc);
     else { hlc = DARK_GRAY; hfc = DARK_GRAY; htc = LIGHT_GRAY; }
 
-    /* HR Number — Row 3 right (50/50: x=140, y=118) */
+    /* HR Number — Row 3 right column, bigger (Font20: x=160, y=118) */
     if (hr_val != last_hr || (!d->hr_valid && last_hr != 0)
         || d->ppg_calibrating != last_calibrating) {
-        GC9A01_fill_rect(140, 118, 38, 16, DARK_BG);
-        GC9A01_set_font(&Font16);
+        GC9A01_fill_rect(160, 118, 50, 22, DARK_BG);
+        GC9A01_set_font(&Font20);
         GC9A01_set_text_color(htc);
         if (d->hr_valid) snprintf(buf, sizeof(buf), "%d", hr_val);
         else if (d->ppg_calibrating) snprintf(buf, sizeof(buf), "Cal");
         else snprintf(buf, sizeof(buf), "--");
-        GC9A01_draw_string(142, 118, buf);
+        GC9A01_draw_string(162, 119, buf);
         last_hr = hr_val;
     }
 
-    /* HR Sweep chart — Row 3 right (50/50: x=124, y=175, w=90, h=35) */
+    /* HR Sweep chart — Row 3, widened across the freed left space
+     * (x=20, y0=176 bottom, w=125, h=50) */
     if (d->hr_valid && hr_val > 0) {
-        if (hr_dx < 0) { hr_dx = 0; hr_py = 175; }
-        sweep_area_chart(124, 175, 90, 35, &hr_dx, &hr_py,
+        if (hr_dx < 0) { hr_dx = 0; hr_py = 176; }
+        sweep_area_chart(20, 176, 125, 50, &hr_dx, &hr_py,
                          hr_val, 40, 150, hlc, hfc);
     } else if (hr_dx != -1) {
         /* Signal lost — clear stale trace so old color doesn't linger */
-        GC9A01_fill_rect(124, 140, 90, 35, DARK_BG);
+        GC9A01_fill_rect(20, 126, 125, 50, DARK_BG);
         hr_dx = -1;
     }
 
-    /* SpO2 number — Row 2 right (unchanged from V1) */
+    /* SpO2 number — Row 2 right, bigger (Font20) */
     uint16_t sbc, stc;
     if (d->hr_valid && spo2_val > 0) get_spo2_colors(spo2_val, &sbc, &stc);
     else { sbc = DARK_GRAY; stc = LIGHT_GRAY; }
 
     if (spo2_val != last_spo2 || (!d->hr_valid && last_spo2 != 0)
         || d->ppg_calibrating != last_calibrating) {
-        GC9A01_fill_rect(155, 66, 55, 18, DARK_BG);
-        GC9A01_set_font(&Font16);
+        GC9A01_fill_rect(150, 62, 65, 22, DARK_BG);
+        GC9A01_set_font(&Font20);
         GC9A01_set_text_color(stc);
         if (d->hr_valid && spo2_val > 0) {
             snprintf(buf, sizeof(buf), "%d", spo2_val);
-            GC9A01_draw_string(157, 68, buf);
-            int16_t px = 157 + (spo2_val >= 100 ? 33 : 22) + 2;
+            GC9A01_draw_string(152, 64, buf);
+            int16_t px = 152 + (spo2_val >= 100 ? 42 : 28) + 2;
             GC9A01_set_font(&Font12);
             GC9A01_set_text_color(LIGHT_GRAY);
             GC9A01_draw_string(px, 70, "%");
         } else if (d->ppg_calibrating) {
-            GC9A01_draw_string(157, 68, "Cal");
+            GC9A01_draw_string(152, 64, "Cal");
         } else {
-            GC9A01_draw_string(157, 68, "--");
+            GC9A01_draw_string(152, 64, "--");
         }
         last_spo2 = spo2_val;
     }
@@ -679,11 +644,11 @@ void dashboard_update_hr(const dashboard_data_t *d)
     }
 }
 
-/* "SAT" blink badge — Row 3 right, between HR number/bpm row and the
- * sweep chart. Blinks at ~2.5 Hz while the HR-source PPG channel
- * (IR or RED, per g_ppg_hr_source) is saturated. Call every PPG sample
- * so the blink stays smooth even though dashboard_update_hr() only
- * runs at ~1 Hz. */
+/* "SAT" blink badge — Row 3 right column, below the HR number/bpm label
+ * and clear of the widened sweep chart. Blinks at ~2.5 Hz while the
+ * HR-source PPG channel (IR or RED, per g_ppg_hr_source) is saturated.
+ * Call every PPG sample so the blink stays smooth even though
+ * dashboard_update_hr() only runs at ~1 Hz. */
 void dashboard_update_sat_badge(const dashboard_data_t *d)
 {
     static bool     sat_shown = false;
@@ -694,15 +659,15 @@ void dashboard_update_sat_badge(const dashboard_data_t *d)
         if (now - last_blink >= 200000U) {  /* 200 ms */
             last_blink = now;
             sat_shown  = !sat_shown;
-            GC9A01_fill_rect(150, 150, 65, 18, DARK_BG);
+            GC9A01_fill_rect(148, 156, 65, 18, DARK_BG);
             if (sat_shown) {
                 GC9A01_set_font(&Font16);
                 GC9A01_set_text_color(SOFT_RED);
-                GC9A01_draw_string(150, 150, "SAT!");
+                GC9A01_draw_string(148, 156, "SAT!");
             }
         }
     } else if (sat_shown || last_blink != 0) {
-        GC9A01_fill_rect(150, 150, 65, 18, DARK_BG);
+        GC9A01_fill_rect(148, 156, 65, 18, DARK_BG);
         sat_shown  = false;
         last_blink = 0;
     }
@@ -719,13 +684,13 @@ void dashboard_update_temp(const dashboard_data_t *d)
     else { tlc = DARK_GRAY; tfc = DARK_GRAY; ttc = LIGHT_GRAY; }
 
     if (temp_x10 != last_temp) {
-        GC9A01_fill_rect(44, 66, 36, 18, DARK_BG);
-        GC9A01_set_font(&Font16);
+        GC9A01_fill_rect(38, 62, 62, 22, DARK_BG);
+        GC9A01_set_font(&Font20);
         GC9A01_set_text_color(ttc);
         if (d->temp_valid && temp_x10 > 0)
             snprintf(buf, sizeof(buf), "%d.%d", temp_x10/10, temp_x10%10);
         else snprintf(buf, sizeof(buf), "--.-");
-        GC9A01_draw_string(46, 68, buf);
+        GC9A01_draw_string(40, 63, buf);
         last_temp = temp_x10;
     }
 
@@ -735,76 +700,54 @@ void dashboard_update_temp(const dashboard_data_t *d)
     }
 }
 
-/* ── Row 4: ECG ON/OFF badge + sweep (full width) ── */
+/* ── Row 4: ECG ON/OFF badge (left) + sweep + ECG-derived HR number (right, bigger) ── */
 void dashboard_update_ecg(const dashboard_data_t *d, uint16_t ecg_val)
 {
-    /* ON/OFF badge — redraw only when ecg_enabled changes */
+    /* ON/OFF badge — redraw only when ecg_enabled changes. Moved next to the
+     * "ECG" label (left) now that the right side holds the HR number. */
     if (d->ecg_enabled != last_ecg_enabled) {
-        GC9A01_fill_rect(180, 184, 30, 12, DARK_BG);
+        GC9A01_fill_rect(55, 184, 32, 12, DARK_BG);
         GC9A01_set_font(&Font12);
         if (d->ecg_enabled) {
             GC9A01_set_text_color(SOFT_GREEN);
-            GC9A01_draw_string(185, 184, "ON");
+            GC9A01_draw_string(58, 184, "ON");
         } else {
             GC9A01_set_text_color(LIGHT_GRAY);
-            GC9A01_draw_string(185, 184, "OFF");
+            GC9A01_draw_string(58, 184, "OFF");
         }
         last_ecg_enabled = d->ecg_enabled;
     }
 
-    /* Sweep waveform — only while ECG streaming is enabled.
-     * Chart is centered at y=206 (±14px) so the baseline (ecg_val≈500)
-     * sits in the middle, letting the signal swing both up and down. */
+    /* Sweep waveform — only while ECG streaming is enabled. Narrowed (88px)
+     * to leave room for the HR number on the right. Chart is centered at
+     * y=206 (±14px) so the baseline (ecg_val≈500) sits in the middle,
+     * letting the signal swing both up and down. */
     if (d->ecg_enabled) {
         ecg_val = (uint16_t)((ecg_val * 1000) / 4095);
         if (ecg_dx < 0) { ecg_dx = 0; ecg_py = 206; }
-        sweep_line(62, 206, 116, 14, &ecg_dx, &ecg_py,
+        sweep_line(62, 206, 88, 14, &ecg_dx, &ecg_py,
                    ecg_val, 0, 1000, SOFT_RED);
     } else if (ecg_dx != -1) {
         /* ECG disabled — clear sweep rect once, idle sentinel */
-        GC9A01_fill_rect(62, 192, 116, 28, DARK_BG);
+        GC9A01_fill_rect(62, 192, 88, 28, DARK_BG);
         ecg_dx = -1;
     }
-}
 
-/* ── Row 3 Left: Steps (compact) ── */
-void dashboard_update_steps(const dashboard_data_t *d, float ac_value)
-{
-    char buf[20];
-
-    if (!d->steps_valid) {
-        if (s_steps_na_shown) return;
-        GC9A01_fill_rect(20, 118, 88, 42, DARK_BG);
-        draw_step_icon(33, 132, LIGHT_GRAY);
-        GC9A01_set_font(&Font16);
-        GC9A01_set_text_color(LIGHT_GRAY);
-        GC9A01_draw_string(43, 122, "--");
-        s_steps_na_shown = true;
-        return;
+    /* ECG-derived HR number — Row 4 right, bigger (Font20), same treatment
+     * as the Row 3 PPG-HR number. */
+    uint8_t hr_ecg_val = d->hr_ecg_valid ? d->hr_ecg : 0;
+    if (hr_ecg_val != last_hr_ecg || (!d->hr_ecg_valid && last_hr_ecg != 0)) {
+        uint16_t lc, fc, tc;
+        if (d->hr_ecg_valid) get_hr_colors(hr_ecg_val, &lc, &fc, &tc);
+        else { lc = fc = DARK_GRAY; tc = LIGHT_GRAY; }
+        (void)lc; (void)fc;
+        GC9A01_fill_rect(150, 178, 50, 22, DARK_BG);
+        GC9A01_set_font(&Font20);
+        GC9A01_set_text_color(tc);
+        char buf[8];
+        if (d->hr_ecg_valid) snprintf(buf, sizeof(buf), "%d", hr_ecg_val);
+        else snprintf(buf, sizeof(buf), "--");
+        GC9A01_draw_string(152, 179, buf);
+        last_hr_ecg = hr_ecg_val;
     }
-    s_steps_na_shown = false;
-
-    if (d->steps == last_steps_disp) return;
-
-    /* Update activity */
-    s_activity = detect_activity(ac_value, d->cadence, d->steps, s_prev_steps);
-    s_prev_steps = d->steps;
-
-    uint16_t act_color = LIGHT_GRAY;
-    if (s_activity == ACT_WALK || s_activity == ACT_FAST_WALK) act_color = SOFT_GREEN;
-    else if (s_activity == ACT_RUN) act_color = ORANGE;
-
-    GC9A01_fill_rect(20, 118, 88, 42, DARK_BG);
-    draw_step_icon(33, 132, act_color);
-
-    GC9A01_set_font(&Font16);
-    GC9A01_set_text_color(act_color);
-    snprintf(buf, sizeof(buf), "%d", (int)d->steps);
-    GC9A01_draw_string(43, 122, buf);
-
-    GC9A01_set_font(&Font12);
-    GC9A01_set_text_color(act_color);
-    GC9A01_draw_string(28, 148, (char*)act_name(s_activity));
-
-    last_steps_disp = d->steps;
 }
