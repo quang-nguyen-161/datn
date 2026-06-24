@@ -28,6 +28,14 @@ Output/
 # Backup/copy directories
 wearable_ecg - Copy/
 
+# Logged/plotted data
+*.csv
+*.png
+
+# Claude Code
+.claude/
+CLAUDE.md
+
 # macOS
 .DS_Store
 
